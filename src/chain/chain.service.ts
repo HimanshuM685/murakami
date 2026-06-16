@@ -1,0 +1,522 @@
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+import { HttpErrorByCode } from '@nestjs/common/utils/http-error-by-code.util';
+import { HttpService } from '@nestjs/axios';
+import { AxiosResponse } from 'axios';
+import { safeStringify } from '../util';
+import {
+  AccountAssetsResponse,
+  AssetHolding,
+  TruncatedAccountAssetResponse,
+  TruncatedAccountResponse,
+  TruncatedAssetHolding,
+  TruncatedPostTransactionsResponse,
+  TruncatedSuggestedParamsResponse,
+} from './algo-node-responses';
+import {
+  AppCallTransactionFields,
+  AssetConfigTransactionFields,
+  AssetTransferTransactionFields,
+  decodeTransaction,
+  encodeSignedTransaction,
+  encodeTransaction,
+  groupTransactions,
+  PaymentTransactionFields,
+  SignedTransaction,
+  Transaction,
+  TransactionParams,
+  TransactionType,
+} from '@algorandfoundation/algokit-utils/transact';
+import { Address } from '@algorandfoundation/algokit-utils';
+import { AppCallRequestDto } from '../wallet/app-call-request.dto';
+import { base64ToBytes, encodeString, encodeUint64 } from './encoding';
+import { sha512_256 } from 'js-sha512';
+
+@Injectable()
+export class ChainService {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly httpService: HttpService,
+  ) {}
+
+  private parseLease(lease: string): Uint8Array {
+    return new Uint8Array(Buffer.from(lease, 'base64'));
+  }
+
+  addSignatureToTxn(encodedTransaction: Uint8Array, signature: Uint8Array): Uint8Array {
+    const decodedTxn = decodeTransaction(encodedTransaction);
+    const stxn: SignedTransaction = { txn: decodedTxn, sig: signature };
+    return encodeSignedTransaction(stxn);
+  }
+
+  /**
+   * Sets the group ID for a list of transactions.
+   *
+   * This function computes a group ID for the given transactions and then sets this ID for each transaction.
+   *
+   * @param txns The list of transactions to be grouped.
+   * @returns The list of transactions with the group ID set.
+   */
+  setGroupID(txns: Uint8Array[]): Uint8Array[] {
+    const decodedTxns = txns.map(decodeTransaction);
+    const groupedTxns = groupTransactions(decodedTxns);
+    return groupedTxns.map(encodeTransaction);
+  }
+
+  async craftAssetCreateTx(
+    creatorAddress: string,
+    options: {
+      total: number;
+      decimals: bigint;
+      defaultFrozen: boolean;
+      unitName: string;
+      assetName: string;
+      url: string;
+      managerAddress?: string;
+      reserveAddress?: string;
+      freezeAddress?: string;
+      clawbackAddress?: string;
+    },
+  ): Promise<Uint8Array> {
+    const suggested_params: TruncatedSuggestedParamsResponse = await this.getSuggestedParams();
+
+    const assetParams: AssetConfigTransactionFields = {
+      assetId: 0n,
+      total: BigInt(options.total),
+      decimals: Number(options.decimals),
+      defaultFrozen: options.defaultFrozen,
+      unitName: options.unitName,
+      assetName: options.assetName,
+      url: options.url,
+      // Only include optional ASA address fields when actually provided —
+      // passing `undefined` here makes algokit-utils throw while building
+      // the transaction.
+      ...(options.managerAddress ? { manager: Address.fromString(options.managerAddress) } : {}),
+      ...(options.reserveAddress ? { reserve: Address.fromString(options.reserveAddress) } : {}),
+      ...(options.freezeAddress ? { freeze: Address.fromString(options.freezeAddress) } : {}),
+      ...(options.clawbackAddress ? { clawback: Address.fromString(options.clawbackAddress) } : {}),
+    };
+
+    const txnParams: TransactionParams = {
+      type: TransactionType.AssetConfig,
+      assetConfig: assetParams,
+      sender: Address.fromString(creatorAddress),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+    };
+
+    return encodeTransaction(new Transaction(txnParams));
+  }
+
+  async craftPaymentTx(
+    from: string,
+    to: string,
+    amount: number,
+    suggested_params?: TruncatedSuggestedParamsResponse,
+    lease?: string,
+    note?: string,
+  ): Promise<Uint8Array> {
+    suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
+
+    const pay: PaymentTransactionFields = {
+      amount: BigInt(amount),
+      receiver: Address.fromString(to),
+    };
+
+    const txnParams: TransactionParams = {
+      type: TransactionType.Payment,
+      payment: pay,
+      sender: Address.fromString(from),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: note ? Uint8Array.from(Buffer.from(note)) : undefined,
+      lease: lease ? this.parseLease(lease) : undefined,
+    };
+
+    return encodeTransaction(new Transaction(txnParams));
+  }
+
+  async craftAssetTransferTx(
+    from: string,
+    to: string,
+    asset_id: bigint,
+    amount: number | bigint,
+    lease?: string,
+    note?: string,
+    suggested_params?: TruncatedSuggestedParamsResponse,
+  ): Promise<Uint8Array> {
+    suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
+
+    const assetTransfer: AssetTransferTransactionFields = {
+      assetId: asset_id,
+      amount: BigInt(amount),
+      receiver: Address.fromString(to),
+    };
+
+    const txnParams: TransactionParams = {
+      type: TransactionType.AssetTransfer,
+      assetTransfer: assetTransfer,
+      sender: Address.fromString(from),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: note ? Uint8Array.from(Buffer.from(note)) : undefined,
+      lease: lease ? this.parseLease(lease) : undefined,
+    };
+
+    return encodeTransaction(new Transaction(txnParams));
+  }
+
+  async craftAssetClawbackTx(
+    clawbackAddress: string,
+    from: string,
+    to: string,
+    asset_id: bigint,
+    amount: number | bigint,
+    lease?: string,
+    note?: string,
+    suggested_params?: TruncatedSuggestedParamsResponse,
+  ): Promise<Uint8Array> {
+    suggested_params = suggested_params ? suggested_params : await this.getSuggestedParams();
+
+    const assetTransfer: AssetTransferTransactionFields = {
+      assetId: asset_id,
+      amount: BigInt(amount),
+      receiver: Address.fromString(to),
+      assetSender: Address.fromString(from),
+    };
+
+    const txnParams: TransactionParams = {
+      type: TransactionType.AssetTransfer,
+      assetTransfer: assetTransfer,
+      sender: Address.fromString(clawbackAddress),
+      fee: BigInt(suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: note ? Uint8Array.from(Buffer.from(note)) : undefined,
+      lease: lease ? this.parseLease(lease) : undefined,
+    };
+
+    return encodeTransaction(new Transaction(txnParams));
+  }
+
+  async craftAppCallTx(
+    managerPublicAddress: string,
+    appCallRequestDto: AppCallRequestDto,
+    suggested_params: TruncatedSuggestedParamsResponse,
+    fee?: number,
+  ) {
+    const appCall: AppCallTransactionFields = {
+      appId: appCallRequestDto.appId ? BigInt(appCallRequestDto.appId) : 0n,
+      onComplete: appCallRequestDto.onComplete ?? 0,
+    };
+
+    if (appCallRequestDto.globalInts || appCallRequestDto.globalByteSlices) {
+      appCall.globalStateSchema = {
+        numUints: appCallRequestDto.globalInts ?? 0,
+        numByteSlices: appCallRequestDto.globalByteSlices ?? 0,
+      };
+    }
+
+    if (appCallRequestDto.localInts || appCallRequestDto.localByteSlices) {
+      appCall.localStateSchema = {
+        numUints: appCallRequestDto.localInts ?? 0,
+        numByteSlices: appCallRequestDto.localByteSlices ?? 0,
+      };
+    }
+
+    if (appCallRequestDto.foreignAssets?.length) {
+      appCall.assetReferences = appCallRequestDto.foreignAssets.map((a: any) => BigInt(a));
+    }
+    if (appCallRequestDto.foreignApps?.length) {
+      appCall.appReferences = appCallRequestDto.foreignApps.map((a: any) => BigInt(a));
+    }
+    if (appCallRequestDto.foreignAccounts?.length) {
+      appCall.accountReferences = appCallRequestDto.foreignAccounts.map((a) => Address.fromString(a));
+    }
+
+    if (appCallRequestDto.boxes?.length) {
+      appCall.boxReferences = appCallRequestDto.boxes.map((b) => ({
+        // `i` is the index into the foreign-apps array (0 = the called app
+        // itself). Default to 0 when callers omit it.
+        appId: b.i !== undefined && b.i !== null ? BigInt(b.i) : 0n,
+        name: new Uint8Array(Buffer.from(b.n, 'base64')),
+      }));
+    }
+
+    if (appCallRequestDto.approvalProgram) appCall.approvalProgram = base64ToBytes(appCallRequestDto.approvalProgram);
+    if (appCallRequestDto.clearProgram) appCall.clearStateProgram = base64ToBytes(appCallRequestDto.clearProgram);
+
+    const appArgs = await this.processAbiMethodArgs(appCallRequestDto.args);
+    if (appArgs.length > 0) appCall.args = appArgs;
+
+    const txnParams: TransactionParams = {
+      type: TransactionType.AppCall,
+      appCall: appCall,
+      sender: Address.fromString(managerPublicAddress),
+      fee: BigInt(fee ?? suggested_params.minFee),
+      firstValid: suggested_params.lastRound,
+      lastValid: suggested_params.lastRound + 1000n,
+      genesisHash: Uint8Array.from(Buffer.from(this.configService.get<string>('GENESIS_HASH'), 'base64')),
+      genesisId: this.configService.get<string>('GENESIS_ID'),
+      note: appCallRequestDto.note ? Uint8Array.from(Buffer.from(appCallRequestDto.note)) : undefined,
+      lease: appCallRequestDto.lease ? this.parseLease(appCallRequestDto.lease) : undefined,
+    };
+
+    return encodeTransaction(new Transaction(txnParams));
+  }
+
+  /**
+   * Build ABI method selector + encoded arguments array suitable for addApplicationArgs.
+   * It uses the ABI specification and embedded `value` fields from AppCallRequestDto.args.
+   * It currently supports uint64, string, and address. Txn-typed args are ignored here
+   * and must be represented as separate transactions in the group.
+   */
+  async processAbiMethodArgs(spec: AppCallRequestDto['args']): Promise<Uint8Array[]> {
+    if (!spec) {
+      return [];
+    }
+
+    const methodName = spec.name;
+    const argSpecs = Array.isArray(spec.args) ? spec.args : [];
+    const returnType = spec.returns?.type ?? 'void';
+
+    const argTypes: string[] = argSpecs.map((s: any) => s.type).filter((t: any): t is string => typeof t === 'string');
+
+    const signature = `${methodName}(${argTypes.join(',')})${returnType}`;
+
+    const selector = new Uint8Array(sha512_256.array(Buffer.from(signature)).slice(0, 4));
+
+    const encodedArgs: Uint8Array[] = [];
+
+    argSpecs.forEach((argSpec: any) => {
+      const type = argSpec.type as string;
+      const value = argSpec.value;
+
+      // For now we skip txn typed args here; they are expected to be
+      // separate transactions in the group, not ABI-encoded scalars.
+      if (type === 'pay' || type === 'keyreg' || type === 'axfer' || type === 'acfg' || type === 'appl') {
+        return;
+      }
+
+      if (value === undefined || value === null) {
+        return;
+      }
+
+      const encoded = this.encodeAbiArgument(type, value);
+
+      if (encoded) {
+        encodedArgs.push(encoded);
+      }
+    });
+
+    return [selector, ...encodedArgs];
+  }
+
+  private encodeAbiArgument(type: string, value: any): Uint8Array | null {
+    switch (type) {
+      case 'uint64': {
+        return encodeUint64(BigInt(value));
+      }
+      case 'string': {
+        return encodeString(value);
+      }
+      case 'address': {
+        // decodeAddress returns the raw public key bytes for an address string
+        return new Address(value).publicKey;
+      }
+      default:
+        throw new Error(`Unsupported ABI argument type: ${type}`);
+    }
+  }
+
+  async makeAlgoNodeRequest(path: string, method: 'GET' | 'POST', data?: any): Promise<any> {
+    const nodeHttpScheme: string = this.configService.get<string>('NODE_HTTP_SCHEME');
+    const nodeHost: string = this.configService.get<string>('NODE_HOST');
+    const nodePort: string = this.configService.get<string>('NODE_PORT');
+    const token: string = this.configService.get<string>('NODE_TOKEN');
+
+    const url: string = `${nodeHttpScheme}://${nodeHost}:${nodePort}/${path}`;
+
+    try {
+      const config = {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'X-Algo-API-Token': token,
+        },
+      };
+
+      let result: AxiosResponse<any>;
+
+      if (method === 'POST') {
+        result = await this.httpService.axiosRef.post(url, data, config);
+      } else {
+        result = await this.httpService.axiosRef.get(url, config);
+      }
+
+      return result.data;
+    } catch (error) {
+      if (error.response?.status) {
+        const message =
+          error.response.text ??
+          (typeof error.response.data === 'string' ? error.response.data : safeStringify(error.response.data));
+        throw new HttpErrorByCode[error.response.status](`NodeException: ${message}`);
+      } else {
+        throw new InternalServerErrorException(`NodeException: ${error.message}`);
+      }
+    }
+  }
+
+  async waitConfirmation(txId: string, waitRounds: bigint = 20n) {
+    // copy paste logic from algo-sdk
+    const startRound = (await this.getSuggestedParams()).lastRound;
+    const stopRound = startRound + waitRounds;
+
+    let currentRound = startRound;
+    while (currentRound < stopRound) {
+      let poolError = false;
+      try {
+        const pendingInfo = await this.makeAlgoNodeRequest(`v2/transactions/pending/${txId}`, 'GET');
+
+        if (pendingInfo['confirmed-round']) {
+          // Got the completed Transaction
+          return pendingInfo;
+        }
+
+        if (pendingInfo['pool-error']) {
+          // If there was a pool error, then the transaction has been rejected
+          poolError = true;
+          throw new Error(`Transaction Rejected: ${pendingInfo['pool-error']}`);
+        }
+      } catch (err) {
+        // Ignore errors from PendingTransactionInformation, since it may return 404 if the algod
+        // instance is behind a load balancer and the request goes to a different algod than the
+        // one we submitted the transaction to
+        if (poolError) {
+          // Rethrow error only if it's because the transaction was rejected
+          throw err;
+        }
+      }
+
+      await this.makeAlgoNodeRequest(`v2/status/wait-for-block-after/${currentRound}`, 'GET');
+      currentRound += BigInt(1);
+    }
+  }
+
+  async getSuggestedParams(): Promise<TruncatedSuggestedParamsResponse> {
+    const response = await this.makeAlgoNodeRequest('v2/transactions/params', 'GET');
+    const suggestedParams: TruncatedSuggestedParamsResponse = {
+      lastRound: BigInt(response['last-round']),
+      minFee: response['min-fee'],
+    };
+    return suggestedParams;
+  }
+
+  /**
+   * Get the account detail for a specific public address.
+   *
+   * @param public_address - The public address of the account.
+   * @returns - The account detail including amount, min balance, and asset holdings.
+   */
+  async getAccountDetail(public_address: string): Promise<TruncatedAccountResponse> {
+    const response = await this.makeAlgoNodeRequest(`v2/accounts/${public_address}`, 'GET');
+
+    Logger.debug(`Account detail response: ${JSON.stringify(response)}`);
+
+    const truncatedAccountResponse: TruncatedAccountResponse = {
+      amount: BigInt(response['amount']),
+      minBalance: BigInt(response['min-balance']),
+      assets: response['assets'].map(
+        (asset: any) => ({ assetId: asset['asset-id'], balance: asset['amount'] }) as TruncatedAssetHolding,
+      ),
+    };
+    return truncatedAccountResponse;
+  }
+
+  // Get Algo Balance, fetch balance from AlgoD
+  async getAccountBalance(public_address: string): Promise<bigint> {
+    const response = await this.makeAlgoNodeRequest(`v2/accounts/${public_address}`, 'GET');
+
+    Logger.debug(`Account balance response: ${JSON.stringify(response)}`);
+
+    return BigInt(response['amount']);
+  }
+
+  /**
+   * Get the asset holding for a specific account and asset ID.
+   *
+   * @param public_address - The public address of the account.
+   * @param asset_id - The ID of the asset.
+   * @returns - The asset holding for the account and asset ID, or null if not found.
+   */
+  async getAccountAssetHoldings(public_address: string): Promise<AssetHolding[]> {
+    const response: AccountAssetsResponse = await this.makeAlgoNodeRequest(`v2/accounts/${public_address}`, 'GET');
+
+    Logger.debug(`Account asset holdings response: ${JSON.stringify(response)}`);
+
+    return response.assets;
+  }
+
+  /**
+   * Get the asset holding for a specific account and asset ID.
+   *
+   * @param public_address - The public address of the account.
+   * @param asset_id - The ID of the asset.
+   * @returns - The asset holding for the account and asset ID, or null if not found.
+   */
+
+  async getAccountAsset(public_address: string, asset_id: bigint): Promise<TruncatedAccountAssetResponse | null> {
+    try {
+      await this.makeAlgoNodeRequest(`v2/accounts/${public_address}/assets/${asset_id}/`, 'GET');
+      const truncatedAccountAssetResponse: TruncatedAccountAssetResponse = {};
+      return truncatedAccountAssetResponse;
+    } catch (error) {
+      if (error.response?.statusCode) {
+        // if 404, account has no asset, we return null
+        if (error.response.statusCode == 404) {
+          return null;
+        }
+        throw error;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Get the last round number from the Algorand node.
+   *
+   * @returns - last round number
+   */
+  async getLastRound(): Promise<bigint> {
+    const response = await this.makeAlgoNodeRequest('v2/status', 'GET');
+    return BigInt(response['last-round']);
+  }
+
+  /**
+   * Submits a transaction or transactions to the Algorand network.
+   *
+   * @param txnOrtxns - The transaction or transactions to be submitted.
+   * @returns - The transaction ID of the submitted transaction.
+   */
+  async submitTransaction(txnOrtxns: Uint8Array | Uint8Array[]): Promise<TruncatedPostTransactionsResponse> {
+    const data = txnOrtxns instanceof Uint8Array ? Buffer.from(txnOrtxns) : Buffer.concat(txnOrtxns);
+    const response = await this.makeAlgoNodeRequest('v2/transactions', 'POST', data);
+    const postTransactionResponse: TruncatedPostTransactionsResponse = {
+      txid: response['txId'],
+    };
+
+    await this.waitConfirmation(postTransactionResponse.txid);
+    return postTransactionResponse;
+  }
+}

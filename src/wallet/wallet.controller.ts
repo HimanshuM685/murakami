@@ -1,0 +1,382 @@
+import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { WalletService } from './wallet.service';
+import { CreateAssetDto } from './create-asset.dto';
+import { CreateAssetResponseDto } from './create-asset-response.dto';
+import { UserInfoResponseDto } from './user-info-response.dto';
+import { CreateUserDto } from './create-user.dto';
+import { AssetTransferRequestDto } from './asset-transfer-request.dto';
+import { AssetTransferResponseDto } from './asset-transfer-response.dto';
+import { ManagerDetailDto } from './manager-detail.dto';
+import { ManagerIdentityDto, DeployManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConflictResponse,
+  ApiCreatedResponse,
+  ApiUnauthorizedResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiBadRequestResponse,
+  ApiNotFoundResponse,
+  ApiUnprocessableEntityResponse,
+} from '@nestjs/swagger';
+import { AccountAssetsDto } from './account-assets.dto';
+import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
+import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
+import { AlgoTransferResponseDto } from './algo-transfer-response.dto';
+import { AssetHolding } from 'src/chain/algo-node-responses';
+import { AppCallRequestDto } from './app-call-request.dto';
+import { AppCallResponseDto } from './app-call-response.dto';
+import { GroupRequestDto } from './group-request.dto';
+import { GroupResponseDto } from './group-response.dto';
+import { ExportPrivateKeyRequestDto, ExportPrivateKeyResponseDto } from './export-private-key.dto';
+
+@ApiBearerAuth()
+@Controller()
+@ApiUnauthorizedResponse({
+  description: 'Unauthorized',
+})
+export class Wallet {
+  constructor(private readonly walletService: WalletService) {}
+
+  // Endpoint to get user details
+  @Get('wallet/users/:user_id/')
+  @ApiOperation({
+    summary: 'Get User by ID',
+    description: 'Endpoint to get user details by User ID',
+  })
+  @ApiCreatedResponse({
+    description: 'The access token has been successfully created.',
+    type: UserInfoResponseDto,
+  })
+  async userDetail(@Request() request: any, @Param('user_id') user_id: string): Promise<UserInfoResponseDto> {
+    // return or 404 if not found
+    return await this.walletService.getUserInfo(user_id, request.vault_token);
+  }
+
+  // Endpoint to export a user's raw private key
+  @Post('wallet/users/:user_id/export')
+  @ApiOperation({
+    summary: 'Export Private Key',
+    description:
+      "Export the user's raw ed25519 private key from Vault. The caller must re-submit a valid " +
+      'Vault AppRole `role_id`/`secret_id` pair as a confirmation step. ' +
+      '**The returned private key grants full control over the user\'s funds — handle with extreme care.**',
+  })
+  @ApiCreatedResponse({
+    description: "The user's private key was exported.",
+    type: ExportPrivateKeyResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async exportPrivateKey(
+    @Request() request: any,
+    @Param('user_id') user_id: string,
+    @Body() exportPrivateKeyDto: ExportPrivateKeyRequestDto,
+  ): Promise<ExportPrivateKeyResponseDto> {
+    return await this.walletService.exportPrivateKey(
+      user_id,
+      request.vault_token,
+      exportPrivateKeyDto.role_id,
+      exportPrivateKeyDto.secret_id,
+    );
+  }
+
+  // Endpont to get manager details
+  @Get('wallet/manager/')
+  @ApiOperation({
+    summary: 'Get Wallet Manager',
+    description: 'Endpoint to get manager details, including the **Algorand** `public_address` of the **Manager**',
+  })
+  @ApiOkResponse({
+    description: 'The details of the manager',
+    type: ManagerDetailDto,
+  })
+  async managersDetail(@Request() request: any): Promise<ManagerDetailDto> {
+    return await this.walletService.getManagerInfo(request.vault_token);
+  }
+
+  // Endpoint to get the manager's issuer DID + resolved DID Document.
+  // Lets wallets and partner verifiers pin the issuer `did:algo`
+  // without shipping a `did:algo` resolver of their own.
+  @Get('wallet/manager/identity')
+  @ApiOperation({
+    summary: 'Get Manager Identity',
+    description:
+      "Resolve the manager's issuer `did:algo` and return its DID Document. " +
+      "The DID is the platform's root of trust for credential issuance and is " +
+      'anchored on the **Algorand** ledger.',
+  })
+  @ApiOkResponse({
+    description: "The manager's issuer DID and resolved DID Document.",
+    type: ManagerIdentityDto,
+  })
+  @ApiNotFoundResponse({
+    description:
+      'No `DIDAlgoStorage` contract is configured for this process. ' +
+      'Call `POST /v1/wallet/manager/identity` (manager-authenticated) to deploy one.',
+  })
+  async managerIdentity(): Promise<ManagerIdentityDto> {
+    return await this.walletService.getManagerIdentity();
+  }
+
+  // Endpoint to deploy (or redeploy) the `DIDAlgoStorage` contract
+  // backing the manager's issuer DID. Manager-authenticated via the
+  // existing global JWT/Vault AuthGuard — the request's vault token
+  // signs the deployment. Useful at first boot, on key rotation, or
+  // when switching networks.
+  @Post('wallet/manager/identity')
+  @ApiOperation({
+    summary: 'Deploy Manager Identity',
+    description:
+      'Deploy a fresh `DIDAlgoStorage` contract using the manager Vault key, then provision and ' +
+      "publish the manager's issuer `did:algo` against it. The contract id is persisted to Vault KV " +
+      '(at `secret/intermezzo/manager/app-id`) so the next boot keeps using the same instance. Per-user ' +
+      '`DIDAlgoStorage` contracts (one per onboarded wallet `did:key`) live under `secret/intermezzo/users/`. Fails ' +
+      'with `409 Conflict` when a contract is already configured — pass `{ "force": true }` to update in ' +
+      "place (key rotation): the existing contract is reused, only the manager's DID-document box is " +
+      'deleted (reclaiming its MBR) and a fresh document is republished.',
+  })
+  @ApiBody({ type: DeployManagerIdentityDto, required: false })
+  @ApiConflictResponse({
+    description:
+      'A `DIDAlgoStorage` contract is already configured for this process. ' +
+      'Pass `{ "force": true }` to redeploy and reclaim MBR.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description:
+      'The manager Algorand account is underfunded and cannot pay for the ' +
+      '`DIDAlgoStorage` contract deployment (algod reports an `overspend`). ' +
+      'Fund the manager account and retry.',
+  })
+  @ApiCreatedResponse({
+    description: 'The manager identity was provisioned successfully.',
+    type: DeployManagerIdentityResponseDto,
+  })
+  async deployManagerIdentity(
+    @Request() request: any,
+    @Body() body: DeployManagerIdentityDto = {},
+  ): Promise<DeployManagerIdentityResponseDto> {
+    return await this.walletService.deployManagerIdentity(request.vault_token, { force: body.force });
+  }
+
+  // Endpoint to fetch asset balance
+  @Get('wallet/assets/:user_id')
+  @ApiOperation({
+    summary: 'Get Account Asset Holdings',
+    description:
+      'Fetch the account asset holdings for a user by their user ID. The response includes the **Algorand** `public_address` of the user and the list of assets held by the user.',
+  })
+  @ApiOkResponse({
+    description: 'The asset balance has been successfully fetched.',
+    type: AccountAssetsDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async assetsBalances(@Request() request: any, @Param('user_id') user_id: string): Promise<AccountAssetsDto> {
+    const accountAssets: AssetHolding[] = await this.walletService.getAssetHoldings(user_id, request.vault_token);
+    const userPublicAddress: string = (await this.walletService.getUserInfo(user_id, request.vault_token))
+      .public_address;
+    const accountAssetsDto: AccountAssetsDto = {
+      address: userPublicAddress,
+      assets: accountAssets,
+    };
+
+    return accountAssetsDto;
+  }
+
+  // Endpoint to create a new user
+  @Post('wallet/user/')
+  @ApiOperation({
+    summary: 'Create User',
+    description:
+      'Create a new **User** in the wallet. The `user_id` is the unique identifier for the user.' +
+      'The response includes the **Algorand** `public_address` of the user.',
+  })
+  @ApiCreatedResponse({
+    description: 'A new user has been created.',
+    type: UserInfoResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async userCreate(@Request() request: any, @Body() newUserParams: CreateUserDto): Promise<UserInfoResponseDto> {
+    return this.walletService.userCreate(newUserParams.user_id, request.vault_token);
+  }
+
+  // Endpont to get all users keys
+  @Get('wallet/users/')
+  @ApiOperation({
+    summary: 'Get Users',
+    description: 'Fetch the list of **Users** in the wallet.',
+  })
+  async userList(@Request() request: any): Promise<UserInfoResponseDto[]> {
+    return this.walletService.getKeys(request.vault_token);
+  }
+
+  // Asset creation for manager
+  @Post('wallet/transactions/create-asset/')
+  @ApiOperation({
+    summary: 'Create Asset',
+    description: 'Create a new **Algorand** `Asset`.',
+  })
+  @ApiCreatedResponse({
+    description: 'The asset has been successfully created.',
+    type: CreateAssetResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async createAsset(@Request() request: any, @Body() createAssetDto: CreateAssetDto): Promise<CreateAssetResponseDto> {
+    return {
+      transaction_id: await this.walletService.createAsset(createAssetDto, request.vault_token),
+    };
+  }
+
+  // Asset transfer manager to user
+  @Post('wallet/transactions/transfer-asset/')
+  @ApiOperation({
+    summary: 'Transfer Asset',
+    description: 'Send an **Algorand** `Asset` from the **Manager** to a **User**.',
+  })
+  @ApiCreatedResponse({
+    description: 'The asset has been successfully transferred.',
+    type: AssetTransferResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async assetTransferTx(
+    @Request() request: any,
+    @Body() assetTransferRequestDto: AssetTransferRequestDto,
+  ): Promise<AssetTransferResponseDto> {
+    return {
+      transaction_id: await this.walletService.transferAsset(
+        request.vault_token,
+        assetTransferRequestDto.assetId,
+        assetTransferRequestDto.userId,
+        assetTransferRequestDto.amount,
+        assetTransferRequestDto.lease,
+        assetTransferRequestDto.note,
+      ),
+    } as AssetTransferResponseDto;
+  }
+
+  // Algo Transfer
+  @Post('wallet/transactions/transfer-algo/')
+  @ApiOperation({
+    summary: 'Transfer Algo',
+    description:
+      'Send **Algorand** `Algos` to another account. The sender can be either the **Manager** or a **User**.',
+  })
+  @ApiCreatedResponse({
+    description: 'The Algos have been successfully transferred.',
+    type: AlgoTransferResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async algoTransferTx(
+    @Request() request: any,
+    @Body() algoTransferRequestDto: AlgoTransferRequestDto,
+  ): Promise<AlgoTransferResponseDto> {
+    return {
+      transaction_id: await this.walletService.transferAlgoToAddress(
+        request.vault_token,
+        algoTransferRequestDto.fromUserId,
+        algoTransferRequestDto.toAddress,
+        algoTransferRequestDto.amount,
+        algoTransferRequestDto.lease,
+        algoTransferRequestDto.note,
+      ),
+    } as AlgoTransferResponseDto;
+  }
+
+  // Asset clawback by manager
+  @Post('wallet/transactions/clawback-asset/')
+  @ApiOperation({
+    summary: 'Clawback Asset',
+    description:
+      'Clawback an **Algorand** `Asset` from a **User** to the **Manager**. The `Asset` must have been created with the manager as the clawback address.',
+  })
+  @ApiCreatedResponse({
+    description: 'The asset has been successfully clawed back.',
+    type: AssetTransferResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async assetClawbackTx(
+    @Request() request: any,
+    @Body() assetClawbackRequestDto: AssetClawbackRequestDto,
+  ): Promise<AssetTransferResponseDto> {
+    return {
+      transaction_id: await this.walletService.clawbackAsset(
+        request.vault_token,
+        assetClawbackRequestDto.assetId,
+        assetClawbackRequestDto.userId,
+        assetClawbackRequestDto.amount,
+        assetClawbackRequestDto.lease,
+        assetClawbackRequestDto.note,
+      ),
+    } as AssetTransferResponseDto;
+  }
+
+  // App Call
+  @Post('wallet/transactions/app-call/')
+  @ApiOperation({
+    summary: 'App Call',
+    description: 'Application call',
+  })
+  @ApiCreatedResponse({
+    description: 'The app call has been successfully completed.',
+    type: AppCallResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async appCallTx(@Request() request: any, @Body() appCallRequestDto: AppCallRequestDto): Promise<AppCallResponseDto> {
+    return {
+      transaction_id: await this.walletService.appCall(request.vault_token, appCallRequestDto),
+    } as AppCallResponseDto;
+  }
+
+  // Group Transaction
+  @Post('wallet/transactions/group-transaction/')
+  @ApiOperation({
+    summary: 'Group Transaction',
+    description: 'Group Transaction',
+  })
+  @ApiCreatedResponse({
+    description: 'The group transaction has been successfully completed.',
+    type: GroupResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'Not Found',
+  })
+  @ApiBadRequestResponse({
+    description: 'Bad Request',
+  })
+  async groupTx(@Request() request: any, @Body() groupRequestDto: GroupRequestDto) {
+    return {
+      group_id: await this.walletService.groupTransaction(request.vault_token, groupRequestDto),
+    };
+  }
+}

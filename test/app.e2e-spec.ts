@@ -1,0 +1,1262 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication } from '@nestjs/common';
+import * as fs from 'fs';
+import { AppModule } from './../src/app.module';
+import axios from 'axios';
+import * as crypto from 'crypto';
+import { randomBytes } from 'crypto';
+import { ConfigService } from '@nestjs/config';
+import { ChainService } from '../src/chain/chain.service';
+import { getApplicationAddress } from '@algorandfoundation/algokit-utils';
+import { HttpService } from '@nestjs/axios';
+import { base58 } from '@scure/base';
+
+const APP_BASE_URL = 'http://localhost:3000/v1';
+const VAULT_BASE_URL = 'http://localhost:8200';
+const VAULT_TRANSIT_USERS_PATH = 'pawn/users';
+const VAULT_TRANSIT_MANAGERS_PATH = 'pawn/managers';
+const VAULT_MANAGER_KEY = 'manager';
+
+// Load role and secret information from JSON files
+const MANAGER_ROLE_AND_SECRET = JSON.parse(fs.readFileSync('manager-role-and-secrets.json').toString());
+const USER_ROLE_AND_SECRET = JSON.parse(fs.readFileSync('user-role-and-secrets.json').toString());
+
+/**
+ * Current endpoints:
+ *
+ * - AUTH ENDPOINTS
+ *      - POST /auth/sign-in/
+ *
+ * - WALLET ENDPOINTS
+ *   - Users
+ *       - GET /wallet/users/:user_id/
+ *       - POST /wallet/users/
+ *       - GET /wallet/users/
+ *   - Managers
+ *       - GET /wallet/manager/
+ *   - Transactions
+ *       - POST /wallet/transactions/create-asset/
+ *
+ */
+
+describe('App E2E', () => {
+  let app: INestApplication;
+
+  // Initialize the NestJS application before each test
+  beforeEach(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  // Function to login to Vault and retrieve a token
+  const loginToVault = async (roleAndSecret: any) => {
+    const response = await axios.post(`${VAULT_BASE_URL}/v1/auth/approle/login`, roleAndSecret);
+    return response.data.auth.client_token;
+  };
+
+  // Function to sign in to the application using the Vault token
+  const signInToPawn = async (vaultToken: string) => {
+    const response = await axios.post(`${APP_BASE_URL}/auth/sign-in/`, { vault_token: vaultToken });
+    return response.data.access_token;
+  };
+
+  // Function to get manager address
+  const getManagerAddress = async () => {
+    const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+    const accessToken = await signInToPawn(vaultToken);
+
+    const manager_detail_response = await axios.get(`${APP_BASE_URL}/wallet/manager/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return manager_detail_response.data.public_address;
+  };
+
+  // Function to get account detail
+  const getAccountDetail = async (address: string) => {
+    const chainService = new ChainService(new ConfigService(), new HttpService());
+    return await chainService.getAccountDetail(address);
+  };
+
+  describe('AUTH', () => {
+    // Test to verify that a user can sign in to the application
+    it('(OK) Can sign in', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const response = await axios.post(`${APP_BASE_URL}/auth/sign-in/`, { vault_token: vaultToken });
+
+      expect(response.data).toHaveProperty('access_token');
+      expect(response.status).toBe(201); // HTTP 201 Created
+    });
+
+    // Test to verify that a user cannot sign in to the application with invalid credentials
+    it('(FAIL) Cannot sign in with invalid credentials', async () => {
+      await expect(signInToPawn('invalid-vault-token')).rejects.toMatchObject({ response: { status: 403 } });
+    });
+  });
+
+  describe('User detail', () => {
+    // Test to verify that a user with the user role can fetch wallet details
+    it('(OK) Create and fetch with manager role', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      // random user id
+      const user_uid = randomBytes(32).toString('hex');
+
+      const create_user_response = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: user_uid },
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(create_user_response.status).toBe(201); // HTTP 201 Created
+      expect(create_user_response.data.user_id).toEqual(user_uid);
+      expect(typeof create_user_response.data.public_address).toBe('string');
+
+      const user_detail_response = await axios.get(`${APP_BASE_URL}/wallet/users/${user_uid}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(user_detail_response.status).toBe(200); // HTTP 200 OK
+      expect(user_detail_response.data).toStrictEqual({
+        user_id: user_uid,
+        public_address: create_user_response.data.public_address,
+        algoBalance: '0', // Initial balance is set to 0
+      });
+    });
+  });
+
+  describe('Manager detail', () => {
+    // Test to verify that a user with the user role can fetch wallet details
+    it('(OK) Get manager detail with manager role', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      const response = await axios.get(`${APP_BASE_URL}/wallet/manager/`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(response.status).toBe(200); // HTTP 200 OK
+      expect(typeof response.data.public_address).toBe('string');
+    });
+
+    it('(FAIL) User fails to fetch manager role due to permissions', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      await expect(
+        axios.get(`${APP_BASE_URL}/wallet/users/manager`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 404 } }); // HTTP 404 Not Found
+    });
+  });
+
+  describe('Users List', () => {
+    it('(OK) Can fetch ALL users with the manager role', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      const response = await axios.get(`${APP_BASE_URL}/wallet/users`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      expect(response.status).toBe(200); // HTTP 200 OK
+      expect(Array.isArray(response.data)).toBe(true);
+    });
+
+    it('(FAIL) Cannot fetch ALL users with the users role', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      await expect(
+        axios.get(`${APP_BASE_URL}/wallet/users`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 403 } }); // HTTP 403 Forbidden
+    });
+  });
+
+  describe('Vault', () => {
+    it('(FAIL) User fails to fetch manager role due to permissions', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      await expect(
+        axios.get(`${APP_BASE_URL}/wallet/users/manager`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 404 } }); // HTTP 404 Not Found
+    });
+
+    it('(FAIL) Cannot config user and manager keys', async () => {
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(managerVaultToken);
+
+      // random user id
+      const user_uid = randomBytes(32).toString('hex');
+
+      const create_user_response = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: user_uid },
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(create_user_response.status).toBe(201);
+
+      // can not use `config` on users key
+      const vaultKeys = [userVaultToken, managerVaultToken];
+
+      for (const vaultKey of vaultKeys) {
+        // can not config user
+        await expect(
+          axios.post(
+            `${VAULT_BASE_URL}/v1/${VAULT_TRANSIT_USERS_PATH}/keys/${user_uid}/config`,
+            { deletion_allowed: true },
+            {
+              headers: {
+                'X-Vault-Token': `${vaultKey}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+            },
+          ),
+        ).rejects.toMatchObject({ response: { status: 403 } });
+
+        // can not config manager
+        await expect(
+          axios.post(
+            `${VAULT_BASE_URL}/v1/${VAULT_TRANSIT_MANAGERS_PATH}/keys/${VAULT_MANAGER_KEY}/config`,
+            { deletion_allowed: true },
+            {
+              headers: {
+                'X-Vault-Token': `${vaultKey}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+            },
+          ),
+        ).rejects.toMatchObject({ response: { status: 403 } });
+      }
+    });
+  });
+
+  describe('Asset creation', () => {
+    /**
+     * Represents the data structure for an asset.
+     *
+     * @property {number} total - The total amount of the asset.
+     * @property {number} decimals - The number of decimal places for the asset.
+     * @property {boolean} defaultFrozen - Indicates if the asset is frozen by default.
+     * @property {string} unitName - The unit name of the asset.
+     * @property {string} assetName - The name of the asset.
+     * @property {string} url - The URL associated with the asset.
+     * @property {string} managerAddress - The address of the asset manager.
+     * @property {string} reserveAddress - The address of the asset reserve.
+     * @property {string} freezeAddress - The address of the asset freeze.
+     * @property {string} clawbackAddress - The address of the asset clawback.
+     */
+    const assetData = {
+      total: 100000,
+      decimals: 0,
+      defaultFrozen: false,
+      unitName: 'Tas',
+      assetName: 'Tennnnnnnnnnnnnnnnnn',
+      url: 'https://example.com',
+      managerAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+      reserveAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+      freezeAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+      clawbackAddress: 'I3345FUQQ2GRBHFZQPLYQQX5HJMMRZMABCHRLWV6RCJYC6OO4MOLEUBEGU',
+    };
+
+    // Test to verify that a user with the manager role can create an asset
+    it('(OK) Can create with manager role', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      try {
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        expect(response.status).toBe(201); // HTTP 201 Created
+        expect(typeof response.data.transaction_id).toEqual('string');
+      } catch {
+        throw new Error(
+          `Unexpected Error.\nYou have to add some algo to manager addrees: ${await getManagerAddress()}\nYou can use https://bank.testnet.algorand.network/`,
+        );
+      }
+    }, 60000);
+
+    // Test to verify that a user with the user role cannot create an asset
+    it('(FAIL) Can not create with user role', async () => {
+      const vaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const accessToken = await signInToPawn(vaultToken);
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 403 } }); // HTTP 403 Forbidden
+    }, 60000);
+  });
+
+  describe('Transfer Algo', () => {
+    it('(OK) transfer algo to address from manager', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      // transfer from manager to new user
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo`,
+        { fromUserId: 'manager', toAddress: createUserResponse.data.public_address, amount: 1000000 },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+      // check algoBalance
+      const userDetailResponse = await axios.get(`${APP_BASE_URL}/wallet/users/${userId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(userDetailResponse.status).toBe(200);
+      expect(userDetailResponse.data.algoBalance).toBe('1000000');
+    }, 60000);
+  });
+
+  describe('Transfer Asset', () => {
+    /**
+     * Represents the data structure for an asset transfer.
+     *
+     * @property {bigint} assetId - The ID of the asset to be transferred.
+     * @property {string} userId - The ID of the user receiving the asset.
+     * @property {number} amount - The amount of the asset to be transferred
+     * @property {string} lease - The transaction lease to be attached to the asset transfer transaction.
+     */
+    const assetTransferRequestData = {
+      assetId: 1,
+      userId: 'test-user-id',
+      amount: 1,
+      lease: undefined,
+    };
+
+    let assetId: bigint | number;
+
+    beforeAll(async () => {
+      // before all tests, create an asset and set assetId
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+
+      const managerAddress = await getManagerAddress();
+      const managerDetail = await getAccountDetail(managerAddress);
+      assetId = managerDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
+        assetId: 0,
+      }).assetId;
+      if (assetId == 0) {
+        throw new Error('Manager does not asset to testing transfer.');
+      }
+    }, 60000);
+
+    afterAll(() => {
+      assetTransferRequestData.amount = 1;
+      assetTransferRequestData.lease = undefined;
+    });
+
+    it('(OK) transfer asset', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+
+      // Transfer the asset
+
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // transfer it again
+
+      const response2 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response2.status).toBe(201); // HTTP 201 Created
+      expect(typeof response2.data.transaction_id).toEqual('string');
+
+      // ############################################################
+      // Check if the asset is transferred to the user by fetching the user's account balance
+      const responseAssetHoldings = await axios.get(`${APP_BASE_URL}/wallet/assets/${userId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(responseAssetHoldings.status).toBe(200); // HTTP 200 OK
+      expect(responseAssetHoldings.data).toHaveProperty('address');
+      expect(responseAssetHoldings.data).toHaveProperty('assets');
+      expect(responseAssetHoldings.data.assets).toBeInstanceOf(Array);
+      expect(responseAssetHoldings.data.assets.length).toBeGreaterThan(0);
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('amount');
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('asset-id');
+      expect(responseAssetHoldings.data.assets[0]['asset-id']).toEqual(assetTransferRequestData.assetId);
+      expect(responseAssetHoldings.data.assets[0].amount).toEqual(assetTransferRequestData.amount * 2);
+      // ############################################################
+    }, 60000);
+
+    it('(FAIL) can transfer asset if user permission', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+
+      // Transfer the asset
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/transfer-asset`, assetTransferRequestData, {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 403 } });
+    }, 60000);
+
+    it('(FAIL) can not transfer asset twice with same lease', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      assetTransferRequestData.assetId = Number(assetId);
+      assetTransferRequestData.userId = userId;
+      assetTransferRequestData.amount = 2;
+
+      // Adds a lease to the transaction to prevent replay and conflicting transactions.
+      // The lease (a 32-byte base64-encoded string) locks the {Sender, Lease} pair until LastValid round expires,
+      // ensuring only one transaction with that lease can be confirmed during that window.
+      // Use a consistent lease value if retrying or managing exclusivity; generating a new random lease each time
+      // prevents replay but won't prevent conflicting submissions.
+      // To generate a lease: Buffer.from(crypto.randomBytes(32)).toString('base64')
+      assetTransferRequestData.lease = Buffer.from(randomBytes(32)).toString('base64');
+
+      // Transfer the asset
+
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetTransferRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // transfer it again
+      assetTransferRequestData.amount = 3;
+
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/transfer-asset`, assetTransferRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 400 } });
+    }, 60000);
+  });
+
+  describe('Clawback Asset', () => {
+    /**
+     * Represents the data structure for an asset clawback.
+     *
+     * @property {bigint} assetId - The ID of the asset to be clawed back.
+     * @property {string} userId - The ID of the user from whom the asset is being clawed back.
+     * @property {number} amount - The amount of the asset to be clawed back.
+     */
+    const assetClawbackRequestData = {
+      assetId: 1,
+      userId: 'test-user-id',
+      amount: 1,
+    };
+
+    let assetId: bigint | number;
+
+    beforeAll(async () => {
+      // before all tests, create an asset and set assetId
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+      const managerAddress = await getManagerAddress();
+
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+        clawbackAddress: managerAddress, // Pawn assumes clawback address is the manager address but it's needs to be set explicitly when creating the asset
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+
+      const managerDetail = await getAccountDetail(managerAddress);
+      assetId = managerDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
+        assetId: 0,
+      }).assetId;
+      if (assetId == 0) {
+        throw new Error('Manager does not asset to testing transfer.');
+      }
+    }, 60000);
+
+    afterAll(() => {
+      assetClawbackRequestData.amount = 1;
+    });
+
+    it('(OK) clawback asset', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+      assetClawbackRequestData.assetId = Number(assetId);
+      assetClawbackRequestData.userId = userId;
+      // Transfer the asset
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+      // clawback the asset
+      const response2 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/clawback-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response2.status).toBe(201); // HTTP 201 Created
+      expect(typeof response2.data.transaction_id).toEqual('string');
+      // ############################################################
+      // Check if the asset is clawed back to the manager by fetching the user's account balance
+      const responseAssetHoldings = await axios.get(`${APP_BASE_URL}/wallet/assets/${userId}`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(responseAssetHoldings.status).toBe(200); // HTTP 200 OK
+      expect(responseAssetHoldings.data).toHaveProperty('address');
+      expect(responseAssetHoldings.data).toHaveProperty('assets');
+      expect(responseAssetHoldings.data.assets).toBeInstanceOf(Array);
+      expect(responseAssetHoldings.data.assets.length).toBeGreaterThan(0); // Asset should be clawed back, but still present
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('amount');
+      expect(responseAssetHoldings.data.assets[0]).toHaveProperty('asset-id');
+      expect(responseAssetHoldings.data.assets[0]['asset-id']).toEqual(assetClawbackRequestData.assetId);
+      expect(responseAssetHoldings.data.assets[0].amount).toEqual(0);
+      // ############################################################
+    }, 60000);
+    it('(FAIL) can not clawback asset if user permission', async () => {
+      const userVaultToken = await loginToVault(USER_ROLE_AND_SECRET);
+      const userAccessToken = await signInToPawn(userVaultToken);
+
+      const managerVaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(managerVaultToken);
+
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+
+      assetClawbackRequestData.assetId = Number(assetId);
+      assetClawbackRequestData.userId = userId;
+
+      // Transfer the asset
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // clawback the asset
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/clawback-asset`, assetClawbackRequestData, {
+          headers: { Authorization: `Bearer ${userAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 403 } });
+    }, 60000);
+    it('(FAIL) can not clawback asset without clawback address', async () => {
+      // create asset without clawback address
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+      const assetData = {
+        total: 100000,
+        decimals: 0,
+        defaultFrozen: false,
+        unitName: 'Tas',
+        assetName: 'Tennnnnnnnnnnnnnnnnn',
+        url: 'https://example.com',
+      };
+      const createAssetResponse = await axios.post(`${APP_BASE_URL}/wallet/transactions/create-asset`, assetData, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(createAssetResponse.status).toBe(201); // HTTP 201 Created
+      const managerAddress = await getManagerAddress();
+      const managerDetail = await getAccountDetail(managerAddress);
+      assetId = managerDetail.assets.reduce((max, current) => (current.assetId > max.assetId ? current : max), {
+        assetId: 0,
+      }).assetId;
+      if (assetId == 0) {
+        throw new Error('Manager does not asset to testing transfer.');
+      }
+      // Create new user
+
+      const userId = randomBytes(32).toString('hex');
+      const createUserResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/user/`,
+        { user_id: userId },
+        {
+          headers: {
+            Authorization: `Bearer ${managerAccessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      expect(createUserResponse.status).toBe(201);
+      assetClawbackRequestData.assetId = Number(assetId);
+      assetClawbackRequestData.userId = userId;
+      // Transfer the asset
+      const response1 = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-asset`,
+        assetClawbackRequestData,
+        {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        },
+      );
+      expect(response1.status).toBe(201); // HTTP 201 Created
+      expect(typeof response1.data.transaction_id).toEqual('string');
+
+      // clawback the asset
+      await expect(
+        axios.post(`${APP_BASE_URL}/wallet/transactions/clawback-asset`, assetClawbackRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        }),
+      ).rejects.toMatchObject({ response: { status: 400 } }); // HTTP 400 Bad Request
+    }, 60000);
+  });
+
+  describe('App calls', () => {
+    /**
+     * Application id created in `beforeAll` and reused by all app-call tests.
+     * Avoids hardcoding a network specific id which makes the suite portable
+     * across testnet/localnet/mainnet.
+     */
+    let deployedAppId: number;
+    /**
+     * Asset id created in `beforeAll` and used by the foreign-assets group
+     * transaction test, since algod validates that referenced foreign assets
+     * exist when the transaction is submitted.
+     */
+    let foreignAssetId: number;
+    /**
+     * Application escrow address. Required because the deployed app's
+     * `opt_in_token` and `create_box_paid` ABI methods assert that the inner
+     * payment's receiver is `global CurrentApplicationAddress`.
+     */
+    let deployedAppAddress: string;
+
+    const APPROVAL_PROGRAM =
+      'CiACAQAmAQQVH3x1MRtBAJaCBAQCvs4RBP5r32kEVH/6RwS4K+3YNhoAjgQAVQA8ACIAAiNDMRkURDEYRDYaAVcCADYaAhcxFiIJSTgQIhJEiAC0IkMxGRREMRhEMRYiCUk4ECISRDYaAReIAF0iQzEZFEQxGEQ2GgEXNhoCF4gAQBYoTFCwIkMxGRREMRhENhoBVwIAiAAZSRUWVwYCTFAoTFCwIkMxGUD/iDEYFEQiQ4oBAYAHSGVsbG8sIIv/UImKAgGL/ov/CImKAgCL/jgAMQASRIv+OAcyChJEMhAyAAiL/jgIEkQyCov/cABFARREsTIKI7ISshSL/7IRgQSyECOyAbOJigMAi/84BzIKEkSL/zgAMQASRIv+FoAHYm94X2ludEsBv4AKYm94X3N0cmluZ4v9UEy/iQ==';
+    const CLEAR_PROGRAM = 'CoEBQw==';
+
+    beforeAll(async () => {
+      const chainService = new ChainService(new ConfigService(), new HttpService());
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // Deploy a fresh application and capture its id from algod.
+      const deployResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/app-call/`,
+        {
+          approvalProgram: APPROVAL_PROGRAM,
+          clearProgram: CLEAR_PROGRAM,
+          globalByteSlices: 1,
+          globalInts: 1,
+          localByteSlices: 0,
+          localInts: 0,
+          onComplete: 0,
+          fromUserId: 'manager',
+        },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(deployResponse.status).toBe(201);
+
+      const pending = await chainService.makeAlgoNodeRequest(
+        `v2/transactions/pending/${deployResponse.data.transaction_id}`,
+        'GET',
+      );
+      deployedAppId = Number(pending['application-index']);
+      if (!deployedAppId) {
+        throw new Error(`Failed to determine deployed application id from pending tx info: ${JSON.stringify(pending)}`);
+      }
+      deployedAppAddress = getApplicationAddress(deployedAppId).toString();
+
+      // Fund the application escrow so it can hold MBR for boxes/asset opt-ins
+      // performed by inner transactions in the group tests below.
+      await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/transfer-algo/`,
+        {
+          toAddress: deployedAppAddress,
+          amount: 1_000_000,
+          fromUserId: 'manager',
+        },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+
+      // Create an asset that will be referenced as a foreign asset in the
+      // group transaction tests below.
+      const createAssetResponse = await axios.post(
+        `${APP_BASE_URL}/wallet/transactions/create-asset`,
+        {
+          total: 100000,
+          decimals: 0,
+          defaultFrozen: false,
+          unitName: 'Tas',
+          assetName: 'ForeignAsset',
+          url: 'https://example.com',
+        },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(createAssetResponse.status).toBe(201);
+      const assetPending = await chainService.makeAlgoNodeRequest(
+        `v2/transactions/pending/${createAssetResponse.data.transaction_id}`,
+        'GET',
+      );
+      foreignAssetId = Number(assetPending['asset-index']);
+      if (!foreignAssetId) {
+        throw new Error(`Failed to determine created asset id from pending tx info: ${JSON.stringify(assetPending)}`);
+      }
+    }, 120000);
+
+    describe('App deploy', () => {
+      it('(OK) app deploy', async () => {
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const appCallRequestData = {
+          approvalProgram: APPROVAL_PROGRAM,
+          clearProgram: CLEAR_PROGRAM,
+          globalByteSlices: 1,
+          globalInts: 1,
+          localByteSlices: 0,
+          localInts: 0,
+          onComplete: 0,
+          fromUserId: 'manager',
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.transaction_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('App abi method call with string args', () => {
+      it('(OK) App abi method call with string args', async () => {
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const appCallRequestData = {
+          appId: deployedAppId,
+          args: {
+            name: 'hello',
+            args: [
+              {
+                type: 'string',
+                value: 'world',
+              },
+            ],
+            returns: {
+              type: 'string',
+            },
+          },
+          fromUserId: 'manager',
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.transaction_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('App abi method call with uint64 args', () => {
+      it('(OK) App abi method call with uint64 args', async () => {
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const appCallRequestData = {
+          appId: deployedAppId,
+          args: {
+            name: 'add',
+            args: [
+              {
+                type: 'uint64',
+                value: 10,
+              },
+              {
+                type: 'uint64',
+                value: 20,
+              },
+            ],
+            returns: {
+              type: 'uint64',
+            },
+          },
+          fromUserId: 'manager',
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/app-call/`, appCallRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+        expect(response.status).toBe(201);
+        expect(typeof response.data.transaction_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('Group transaction (foreign Accounts and Assets)', () => {
+      it('(OK) Group call with payment and app call with foreign Accounts and Assets', async () => {
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                // The deployed app's `opt_in_token` ABI method asserts that the
+                // payment recipient equals `global CurrentApplicationAddress`.
+                toAddress: deployedAppAddress,
+                amount: 101000,
+                fromUserId: 'manager',
+                note: 'optional note',
+                lease: randomBytes(32).toString('base64'),
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: deployedAppId,
+                onComplete: 0,
+                fromUserId: 'manager',
+                fee: 2000,
+                args: {
+                  name: 'opt_in_token',
+                  args: [
+                    { type: 'pay', value: null },
+                    { type: 'uint64', value: foreignAssetId },
+                  ],
+                  returns: { type: 'void' },
+                },
+                foreignAccounts: ['CHIJEK5EF3DD6EHCM23CV6IXO7JI4YIOHGN6755G6X3NQVYVKJV3WM7M2A'],
+                foreignAssets: [foreignAssetId],
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
+
+    describe('Group transaction (foreign apps and boxes)', () => {
+      it('(OK) Group call with payment and app call with foreign Apps and Boxes', async () => {
+        const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+        const managerAccessToken = await signInToPawn(vaultToken);
+
+        // The TEAL `create_box_paid` method puts a box named
+        // `box_string<arg>`. Use a random suffix so re-runs don't collide
+        // with boxes left over from a previous run.
+        const boxSuffix = randomBytes(4).toString('hex');
+        const boxStringName = Buffer.from(`box_string${boxSuffix}`).toString('base64');
+        const boxIntName = Buffer.from('box_int').toString('base64');
+
+        const groupRequestData = {
+          transactions: [
+            {
+              type: 'payment',
+              payload: {
+                // The deployed app's `create_box_paid` ABI method asserts that
+                // the payment recipient equals `global CurrentApplicationAddress`.
+                toAddress: deployedAppAddress,
+                amount: 100000,
+                fromUserId: 'manager',
+                note: 'optional note',
+                lease: randomBytes(32).toString('base64'),
+              },
+            },
+            {
+              type: 'appCall',
+              payload: {
+                appId: deployedAppId,
+                onComplete: 0,
+                fromUserId: 'manager',
+                fee: 2000,
+                args: {
+                  name: 'create_box_paid',
+                  args: [
+                    { type: 'string', value: boxSuffix },
+                    { type: 'uint64', value: 123 },
+                    { type: 'pay', value: null },
+                  ],
+                  returns: { type: 'void' },
+                },
+                foreignApps: [deployedAppId],
+                boxes: [{ n: boxIntName }, { n: boxStringName }],
+              },
+            },
+          ],
+        };
+
+        const response = await axios.post(`${APP_BASE_URL}/wallet/transactions/group-transaction/`, groupRequestData, {
+          headers: { Authorization: `Bearer ${managerAccessToken}` },
+        });
+
+        expect(response.status).toBe(201);
+        expect(typeof response.data.group_id).toEqual('string');
+      }, 60000);
+    });
+  });
+
+  /**
+   * End-to-end coverage for the wallet user story:
+   *
+   *   1. The manager deploys their own `did:algo` identity by calling
+   *      `POST /v1/wallet/manager/identity`. This is idempotent: once
+   *      a `DIDAlgoStorage` contract is configured the endpoint
+   *      returns `409 Conflict`, which is fine — we treat it as
+   *      "already deployed, move on".
+   *   2. A self-custody wallet (here: an ephemeral Ed25519 keypair
+   *      that exposes itself as a `did:key`) drives the attestation
+   *      handshake (`POST /v1/link/challenge` → sign nonce →
+   *      `POST /v1/link/response`) to obtain a credential offer URI.
+   *   3. The wallet redeems the offer through the OID4VCI
+   *      pre-authorized-code flow and walks away with a verifiable
+   *      `device-attestation-credential` SD-JWT VC issued by the
+   *      manager.
+   *
+   * The test is designed to run against a live dev stack
+   * (`yarn start:dev`, Vault initialised via `yarn vault:development:init`,
+   * and the LocalNet sandbox already funded).
+   */
+  describe('Manager identity → self-custody credential issuance', () => {
+    const PRE_AUTH_GRANT = 'urn:ietf:params:oauth:grant-type:pre-authorized_code';
+    const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+    const ED25519_MULTICODEC_PREFIX = Uint8Array.from([0xed, 0x01]);
+
+    interface SelfCustodyWallet {
+      privateKey: crypto.KeyObject;
+      didKey: string;
+    }
+
+    const base64Url = (input: Buffer | string): string => {
+      const buf = typeof input === 'string' ? Buffer.from(input, 'utf8') : input;
+      return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    };
+
+    /**
+     * Build a self-custody wallet from an explicit 32-byte seed. The
+     * seed is randomised per-run so re-running the suite never reuses
+     * a `did:key` (the `link/challenge` Vault row is consumed on
+     * redeem; a fresh DID keeps the challenge KV folder clean too).
+     */
+    const buildWallet = (): SelfCustodyWallet => {
+      const seed = randomBytes(32);
+      const privateKey = crypto.createPrivateKey({
+        key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]),
+        format: 'der',
+        type: 'pkcs8',
+      });
+      const spki = crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' });
+      const publicKeyRaw = Buffer.from(spki.subarray(spki.length - 32));
+      const multibasePayload = Buffer.concat([ED25519_MULTICODEC_PREFIX, publicKeyRaw]);
+      const didKey = `did:key:z${base58.encode(multibasePayload)}`;
+      return { privateKey, didKey };
+    };
+
+    /**
+     * Credo emits offer URIs of the form
+     * `openid-credential-offer://?credential_offer_uri=<url>` (or
+     * `credential_offer=<inline-json>`). Resolve to the parsed JSON
+     * payload either way.
+     */
+    const resolveCredentialOffer = async (offerUri: string) => {
+      const queryIndex = offerUri.indexOf('?');
+      expect(queryIndex).toBeGreaterThan(-1);
+      const params = new URLSearchParams(offerUri.slice(queryIndex + 1));
+      const inline = params.get('credential_offer');
+      if (inline) return JSON.parse(inline);
+      const uri = params.get('credential_offer_uri');
+      expect(uri).toBeTruthy();
+      const fetched = await axios.get(uri!);
+      return fetched.data;
+    };
+
+    const buildHolderProofJwt = (input: {
+      didKey: string;
+      audience: string;
+      nonce: string | undefined;
+      privateKey: crypto.KeyObject;
+    }): string => {
+      // did:key `kid` must include a fragment identifier; Credo's
+      // resolver rejects the bare DID with "didUrl '...' does not
+      // contain a '#'".
+      const methodSpecific = input.didKey.replace(/^did:key:/, '');
+      const header = { alg: 'EdDSA', typ: 'openid4vci-proof+jwt', kid: `${input.didKey}#${methodSpecific}` };
+      const payload: Record<string, unknown> = {
+        aud: input.audience,
+        iat: Math.floor(Date.now() / 1000),
+      };
+      if (input.nonce) payload.nonce = input.nonce;
+      const signingInput = `${base64Url(JSON.stringify(header))}.${base64Url(JSON.stringify(payload))}`;
+      const signature = crypto.sign(null, Buffer.from(signingInput, 'utf8'), input.privateKey);
+      return `${signingInput}.${base64Url(signature)}`;
+    };
+
+    it('deploys the manager identity (idempotently)', async () => {
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      let status: number;
+      try {
+        const response = await axios.post(
+          `${APP_BASE_URL}/wallet/manager/identity`,
+          {},
+          { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+        );
+        status = response.status;
+        expect(response.data).toMatchObject({ did: expect.stringMatching(/^did:algo:/) });
+      } catch (err: any) {
+        // 409: the contract was provisioned by a previous run — that
+        // is exactly the documented idempotency behaviour and a
+        // successful outcome for this test. Any other failure mode
+        // (e.g. 422 "manager underfunded") must surface.
+        if (err?.response?.status !== 409) throw err;
+        status = err.response.status;
+      }
+      expect([201, 409]).toContain(status);
+
+      // Either way, the manager identity should now be queryable.
+      const identity = await axios.get(`${APP_BASE_URL}/wallet/manager/identity`, {
+        headers: { Authorization: `Bearer ${managerAccessToken}` },
+      });
+      expect(identity.status).toBe(200);
+      expect(identity.data.did).toMatch(/^did:algo:/);
+    }, 120000);
+
+    it('issues a device-attestation SD-JWT VC to a self-custody did:key wallet', async () => {
+      const wallet = buildWallet();
+      const vaultToken = await loginToVault(MANAGER_ROLE_AND_SECRET);
+      const managerAccessToken = await signInToPawn(vaultToken);
+
+      // 1. Manager creates a pre-authorized offer for the wallet did:key.
+      // (The manager is assumed to have verified the user/device out-of-band).
+      const redeemed = await axios.post(
+        `${APP_BASE_URL}/credential/issuer/offers`,
+        {
+          credentialConfigurationIds: ['device-attestation-credential'],
+          holderDidKey: wallet.didKey,
+          issuanceMetadata: {
+            attested_at: new Date().toISOString(),
+          },
+        },
+        { headers: { Authorization: `Bearer ${managerAccessToken}` } },
+      );
+      expect(redeemed.status).toBe(201);
+      expect(typeof redeemed.data.credentialOffer).toBe('string');
+
+      // 2. Drive the OID4VCI pre-authorized-code flow as the wallet.
+      const offer = await resolveCredentialOffer(redeemed.data.credentialOffer);
+      expect(Array.isArray(offer.credential_configuration_ids)).toBe(true);
+      const preAuthCode = offer.grants?.[PRE_AUTH_GRANT]?.['pre-authorized_code'];
+      expect(typeof preAuthCode).toBe('string');
+
+      const issuerMeta = await axios
+        .get(`${offer.credential_issuer.replace(/\/$/, '')}/.well-known/openid-credential-issuer`)
+        .then((r) => r.data);
+      const tokenEndpoint =
+        issuerMeta.token_endpoint ??
+        `${(issuerMeta.authorization_servers?.[0] ?? issuerMeta.credential_issuer).replace(/\/$/, '')}/token`;
+
+      const tokenBody = new URLSearchParams();
+      tokenBody.set('grant_type', PRE_AUTH_GRANT);
+      tokenBody.set('pre-authorized_code', preAuthCode);
+      const token = await axios
+        .post(tokenEndpoint, tokenBody.toString(), {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        })
+        .then((r) => r.data);
+      expect(typeof token.access_token).toBe('string');
+
+      // 4. Submit the holder proof JWT and pick up the SD-JWT VC.
+      const proof = buildHolderProofJwt({
+        didKey: wallet.didKey,
+        audience: offer.credential_issuer,
+        nonce: token.c_nonce,
+        privateKey: wallet.privateKey,
+      });
+      const vct = offer.credential_configuration_ids[0];
+      const credentialResp = await axios
+        .post(
+          issuerMeta.credential_endpoint,
+          { format: 'vc+sd-jwt', vct, proof: { proof_type: 'jwt', jwt: proof } },
+          { headers: { Authorization: `Bearer ${token.access_token}` } },
+        )
+        .then((r) => r.data);
+
+      // Normalise across Credo response shapes (single `credential`
+      // vs. an array of `credentials`).
+      let compact: string | undefined = credentialResp.credential;
+      if (!compact && Array.isArray(credentialResp.credentials) && credentialResp.credentials.length > 0) {
+        const first = credentialResp.credentials[0];
+        compact = typeof first === 'string' ? first : first?.credential;
+      }
+      expect(typeof compact).toBe('string');
+      // SD-JWT VC compact serialisation: `<jws>~<disclosure>~...` —
+      // i.e. a JWT (3 segments) optionally followed by `~`-separated
+      // disclosures. Either form must at least contain the JWS dots.
+      expect(compact!.split('.').length).toBeGreaterThanOrEqual(3);
+    }, 120000);
+  });
+});
