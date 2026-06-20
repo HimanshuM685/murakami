@@ -288,13 +288,13 @@ async function createACLPolicies(token: string) {
           },
 
           // KV-v2 (`secret/` mount) — operational state the service
-          // owns, namespaced under `intermezzo/`. Both `data/` (versions)
+          // owns, namespaced under `murakami/`. Both `data/` (versions)
           // and `metadata/` (list/delete) paths are required for full
           // KV-v2 read/write/list/delete via `VaultService.kv*`.
-          [`secret/data/intermezzo/*`]: {
+          [`secret/data/murakami/*`]: {
             capabilities: ['create', 'read', 'update', 'delete'],
           },
-          [`secret/metadata/intermezzo/*`]: {
+          [`secret/metadata/murakami/*`]: {
             capabilities: ['list', 'read', 'delete'],
           },
         },
@@ -303,7 +303,7 @@ async function createACLPolicies(token: string) {
 
     // Upsert the ACL policies. We always PUT (Vault treats this as
     // upsert) so existing dev vaults pick up policy changes — e.g.
-    // newly granted `secret/data/intermezzo/*` capabilities — without
+    // newly granted `secret/data/murakami/*` capabilities — without
     // needing a full reset.
     for (const [policyName, policy] of Object.entries(policies)) {
       const policyExists = await checkACLPoliciesExists(policyName, token);

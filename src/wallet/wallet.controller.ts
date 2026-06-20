@@ -132,8 +132,8 @@ export class Wallet {
     description:
       'Deploy a fresh `DIDAlgoStorage` contract using the manager Vault key, then provision and ' +
       "publish the manager's issuer `did:algo` against it. The contract id is persisted to Vault KV " +
-      '(at `secret/intermezzo/manager/app-id`) so the next boot keeps using the same instance. Per-user ' +
-      '`DIDAlgoStorage` contracts (one per onboarded wallet `did:key`) live under `secret/intermezzo/users/`. Fails ' +
+      '(at `secret/murakami/manager/app-id`) so the next boot keeps using the same instance. Per-user ' +
+      '`DIDAlgoStorage` contracts (one per onboarded wallet `did:key`) live under `secret/murakami/users/`. Fails ' +
       'with `409 Conflict` when a contract is already configured — pass `{ "force": true }` to update in ' +
       "place (key rotation): the existing contract is reused, only the manager's DID-document box is " +
       'deleted (reclaiming its MBR) and a fresh document is republished.',

@@ -16,7 +16,7 @@
  *   - {@link KeyRefStore} — persistence port for
  *     `publicKeyBase58 → VaultKeyBinding` rows, so bindings survive
  *     process restarts. The host implements this against its own
- *     persistence layer (TypeORM in Intermezzo, Prisma in CREDEBL,
+ *     persistence layer (TypeORM in Murakami, Prisma in CREDEBL,
  *     etc.).
  *
  * This file is interface-only on purpose: no Nest decorators, no
@@ -56,7 +56,7 @@ export type VaultSigner = (binding: VaultKeyBinding, data: Uint8Array) => Promis
  * by the signing registry so signing requests for a Credo-held public
  * key can be routed back to the host's KMS across process restarts.
  *
- * Implemented by TypeORM in Intermezzo (over `Oid4vcVaultKeyBinding`),
+ * Implemented by TypeORM in Murakami (over `Oid4vcVaultKeyBinding`),
  * and by Prisma — or whatever — in CREDEBL.
  *
  * Implementations MUST be safe to call from a process-singleton in a

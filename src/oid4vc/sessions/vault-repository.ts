@@ -8,13 +8,13 @@ import { Oid4vcVerificationSession } from '../entities/oid4vc-verification-sessi
 @Injectable()
 export class Oid4vcIssuanceSessionRepository extends VaultRepository<Oid4vcIssuanceSession> {
   constructor(vault: VaultService, tokenProvider: AlgoVaultTokenProvider) {
-    super(vault, tokenProvider, 'intermezzo/oid4vc/sessions/issuance', 'credoIssuanceSessionId');
+    super(vault, tokenProvider, 'murakami/oid4vc/sessions/issuance', 'credoIssuanceSessionId');
   }
 }
 
 @Injectable()
 export class Oid4vcVerificationSessionRepository extends VaultRepository<Oid4vcVerificationSession> {
   constructor(vault: VaultService, tokenProvider: AlgoVaultTokenProvider) {
-    super(vault, tokenProvider, 'intermezzo/oid4vc/sessions/verification', 'credoVerificationSessionId');
+    super(vault, tokenProvider, 'murakami/oid4vc/sessions/verification', 'credoVerificationSessionId');
   }
 }

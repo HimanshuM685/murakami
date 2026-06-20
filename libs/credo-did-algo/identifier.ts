@@ -2,7 +2,7 @@
  * Pure identifier helpers for the `did:algo` method.
  *
  * Kept dependency‑free (no Credo, no Nest, no Vault, no chain access) so
- * that any host — Intermezzo today, CREDEBL tomorrow — can parse a
+ * that any host — Murakami today, CREDEBL tomorrow — can parse a
  * `did:algo` without pulling the rest of the plugin into scope.
  *
  * Canonical shape:

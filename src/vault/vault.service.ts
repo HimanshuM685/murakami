@@ -253,7 +253,7 @@ export class VaultService {
   // The mount path defaults to `secret` (Vault dev/prod default
   // mount for KV v2) and can be overridden with `VAULT_KV_MOUNT`.
   // All keys are scoped under a caller-supplied path; callers are
-  // expected to namespace them (e.g. `intermezzo/manager/app-id`).
+  // expected to namespace them (e.g. `murakami/manager/app-id`).
   // ────────────────────────────────────────────────────────────────
 
   private getKvMount(): string {

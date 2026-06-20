@@ -373,10 +373,10 @@ describe('VaultService', () => {
           config: { headers: {} as any },
         } as AxiosResponse);
 
-        const result = await vaultService.kvRead('intermezzo/manager/app-id', 'token');
+        const result = await vaultService.kvRead('murakami/manager/app-id', 'token');
 
         expect(httpService.axiosRef.get).toHaveBeenCalledWith(
-          `${baseUrl}/v1/${defaultMount}/data/intermezzo/manager/app-id`,
+          `${baseUrl}/v1/${defaultMount}/data/murakami/manager/app-id`,
           { headers: { 'X-Vault-Token': 'token' } },
         );
         expect(result).toEqual(payload);
@@ -441,10 +441,10 @@ describe('VaultService', () => {
           config: { headers: {} as any },
         } as AxiosResponse);
 
-        await vaultService.kvWrite('intermezzo/manager/app-id', { appId: '123' }, 'token');
+        await vaultService.kvWrite('murakami/manager/app-id', { appId: '123' }, 'token');
 
         expect(httpService.axiosRef.post).toHaveBeenCalledWith(
-          `${baseUrl}/v1/${defaultMount}/data/intermezzo/manager/app-id`,
+          `${baseUrl}/v1/${defaultMount}/data/murakami/manager/app-id`,
           { data: { appId: '123' } },
           {
             headers: {
@@ -474,10 +474,10 @@ describe('VaultService', () => {
           config: { headers: {} as any },
         } as AxiosResponse);
 
-        await vaultService.kvDelete('intermezzo/challenges/abc', 'token');
+        await vaultService.kvDelete('murakami/challenges/abc', 'token');
 
         expect(httpService.axiosRef.delete).toHaveBeenCalledWith(
-          `${baseUrl}/v1/${defaultMount}/metadata/intermezzo/challenges/abc`,
+          `${baseUrl}/v1/${defaultMount}/metadata/murakami/challenges/abc`,
           { headers: { 'X-Vault-Token': 'token' } },
         );
       });
@@ -508,10 +508,10 @@ describe('VaultService', () => {
           config: { headers: {} as any },
         } as AxiosResponse);
 
-        const result = await vaultService.kvList('intermezzo/challenges', 'token');
+        const result = await vaultService.kvList('murakami/challenges', 'token');
 
         expect(httpService.axiosRef.request).toHaveBeenCalledWith({
-          url: `${baseUrl}/v1/${defaultMount}/metadata/intermezzo/challenges`,
+          url: `${baseUrl}/v1/${defaultMount}/metadata/murakami/challenges`,
           method: 'LIST',
           headers: { 'X-Vault-Token': 'token' },
         });

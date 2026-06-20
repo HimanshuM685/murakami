@@ -25,4 +25,4 @@ export const DEFAULT_CREDENTIAL_CONFIGURATIONS: OpenId4VciCredentialConfiguratio
  * Vault KV-v2 folder under the platform mount where dynamic
  * credential configurations are stored.
  */
-export const CREDENTIAL_CONFIGURATIONS_KV_FOLDER = 'intermezzo/oid4vc/credential-configurations';
+export const CREDENTIAL_CONFIGURATIONS_KV_FOLDER = 'murakami/oid4vc/credential-configurations';

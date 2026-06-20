@@ -31,14 +31,14 @@ import { ManagerVaultTokenProvider } from '../auth/manager-vault-token.provider'
  * so the value lives alongside the existing Vault-managed state
  * instead of in `.env` or a sidecar database.
  */
-export const MANAGER_APP_ID_KV_PATH = 'intermezzo/manager/app-id';
+export const MANAGER_APP_ID_KV_PATH = 'murakami/manager/app-id';
 
 /** Folder under which per-user `DIDAlgoStorage` app ids are stored,
  * keyed by the wallet's `did:key`. Each user gets their **own**
  * contract so the box-MBR follows the user (not the manager) and
  * tear-down is local to that user.
  */
-export const USERS_APP_ID_KV_FOLDER = 'intermezzo/users/';
+export const USERS_APP_ID_KV_FOLDER = 'murakami/users/';
 
 /** Build the per-user KV path for a wallet `did:key`. */
 export function userAppIdKvPath(didKey: string): string {
@@ -393,7 +393,7 @@ export class DidService {
 
   /**
    * Persist a freshly-deployed per-user `DIDAlgoStorage` app id
-   * under `intermezzo/users/{did:key}/app-id` in Vault KV. Idempotent
+   * under `murakami/users/{did:key}/app-id` in Vault KV. Idempotent
    * — overwrites any previous value (callers prove they hold the
    * `did:key`'s private signer at create time, so this is safe).
    */
@@ -403,7 +403,7 @@ export class DidService {
 
   /**
    * List every user `did:key` that has a per-user `DIDAlgoStorage`
-   * contract registered in Vault KV under `intermezzo/users/`,
+   * contract registered in Vault KV under `murakami/users/`,
    * together with their `did:algo` identifier and contract metadata.
    *
    * Pure KV read — does **not** resolve the on-chain DID Document.
@@ -411,7 +411,7 @@ export class DidService {
   async listUserDids(
     vaultToken: string,
   ): Promise<Array<{ didKey: string; did: string; appId: string; appAddress: string }>> {
-    // KV list returns immediate children of `intermezzo/users/`. Each
+    // KV list returns immediate children of `murakami/users/`. Each
     // child is the URL-encoded `did:key` followed by `/` (KV-v2 marks
     // subfolders with a trailing slash).
     const entries = await this.vaultService.kvList(USERS_APP_ID_KV_FOLDER, vaultToken);

@@ -3,7 +3,7 @@
  *
  * Interface-only on purpose — no Nest decorators, no TypeORM, no
  * Vault / KMS SDK imports — so this file stays trivially consumable
- * from any host (CREDEBL, Intermezzo, etc.).
+ * from any host (CREDEBL, Murakami, etc.).
  *
  * Two surfaces:
  *
@@ -92,7 +92,7 @@ export interface DidAlgoChainReaderPort {
 
 /**
  * Write-only chain-side port. Implemented only by hosts that publish
- * `did:algo` documents (e.g. Intermezzo's `DidAlgoChainAdapter`).
+ * `did:algo` documents (e.g. Murakami's `DidAlgoChainAdapter`).
  */
 export interface DidAlgoChainWriterPort {
   /**
@@ -140,7 +140,7 @@ export interface DidAlgoChainWriterPort {
  * a vault / HSM client (e.g. `@algorandfoundation/credo-vault-wallet`).
  *
  * The contract is intentionally minimal so a CREDEBL host (Prisma +
- * any KMS) can implement it as cleanly as Intermezzo (TypeORM +
+ * any KMS) can implement it as cleanly as Murakami (TypeORM +
  * HashiCorp Vault).
  *
  * Returned `keyRef` is opaque to the package and is the same value

@@ -13,7 +13,7 @@ import type { KeyRefStore, VaultKeyBinding, VaultSigner } from './ports';
  *
  * Persistence model:
  *   - The mapping `publicKeyBase58 → VaultKeyBinding` lives in
- *     whatever store the host plugs in (TypeORM in Intermezzo,
+ *     whatever store the host plugs in (TypeORM in Murakami,
  *     Prisma in CREDEBL, etc.).
  *   - An in-process cache (a plain `Map`, sufficient for a small
  *     working set) backs the read path so the common case is a

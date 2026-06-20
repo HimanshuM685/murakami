@@ -9,7 +9,7 @@ import type {
 } from '../../../libs/credo-did-algo';
 
 /**
- * Intermezzo's adapter binding the in‑repo `DidService` to the chain
+ * Murakami's adapter binding the in‑repo `DidService` to the chain
  * ports exposed by `@algorandfoundation/credo-did-algo`.
  *
  * Implements both the reader and writer surfaces:
@@ -46,7 +46,7 @@ export class DidAlgoChainAdapter implements DidAlgoChainReaderPort, DidAlgoChain
     // Decode the canonical public key out of the consumer's
     // `publicKeyBase58` so the chain publish doesn't need a second
     // Vault round-trip. `keyRef` is opaque to the package and to this
-    // adapter — Intermezzo's manager signer is rebuilt from the
+    // adapter — Murakami's manager signer is rebuilt from the
     // manager Vault key by `publishControlledDid` itself. Hosts on a
     // different KMS would route the keyRef through the
     // `credo-vault-wallet` signer instead.

@@ -35,7 +35,7 @@ export class AlgoDidResolver implements DidResolver {
   /**
    * Optional logger surface. We don't depend on `@nestjs/common.Logger`
    * directly so the package is consumable from non-Nest hosts; the
-   * Intermezzo wrapper passes a Nest logger that satisfies this shape.
+   * Murakami wrapper passes a Nest logger that satisfies this shape.
    */
   private readonly logger: { warn: (msg: string) => void; error: (msg: string) => void };
 

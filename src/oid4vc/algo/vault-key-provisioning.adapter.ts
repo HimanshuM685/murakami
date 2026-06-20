@@ -4,7 +4,7 @@ import { AlgoVaultTokenProvider } from './algo-vault-token.provider';
 import type { KeyProvisioningPort } from '../../../libs/credo-did-algo';
 
 /**
- * Intermezzo's adapter binding `VaultService` + `AlgoVaultTokenProvider`
+ * Murakami's adapter binding `VaultService` + `AlgoVaultTokenProvider`
  * to the `KeyProvisioningPort` exposed by `@algorandfoundation/credo-did-algo`.
  *
  * Post‑v2 the only key the OID4VC agent ever provisions is the

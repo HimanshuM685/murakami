@@ -1,6 +1,6 @@
-# Intermezzo
+# Murakami
 
-Intermezzo uses a traditional KMS (Key Management Service) to manage the keys for Algorand transaction signing and integration. In this specific case, we are using Hashicorp Vault as the KMS.
+Murakami uses a traditional KMS (Key Management Service) to manage the keys for Algorand transaction signing and integration. In this specific case, we are using Hashicorp Vault as the KMS.
 
 ## For whom is this?
 
@@ -196,7 +196,7 @@ curl -s "$PAWN/wallet/assets/1234" -H "Authorization: Bearer $TOKEN"
 > [!WARNING]
 > Exporting a private key removes Vault's isolation guarantee for that
 > key: once exported, the raw key material exists outside of Vault and
-> Intermezzo can no longer protect it. Only enable this for users/flows
+> Murakami can no longer protect it. Only enable this for users/flows
 > that genuinely need a self-custody export (e.g. "back up my wallet"),
 > and treat the response as highly sensitive (do not log it, store it
 > encrypted, transmit only over TLS).
@@ -257,7 +257,7 @@ curl -s "$PAWN/wallet/manager/identity" -H "Authorization: Bearer $TOKEN"
 
 Deploys a fresh `DIDAlgoStorage` contract with the manager Vault key and
 publishes the manager's issuer `did:algo`. The app id is persisted to
-Vault KV at `secret/intermezzo/manager/app-id`. Fails with `409` when a
+Vault KV at `secret/murakami/manager/app-id`. Fails with `409` when a
 contract is already configured — pass `{"force": true}` to redeploy in
 place (key rotation), which reclaims the old document box MBR.
 
@@ -678,15 +678,15 @@ sudo rm vault-seal-keys.json package-lock.json manager-role-and-secrets.json use
 ```
 # SECURITY
 
-It's important to understand that Intermezzo does **NOT** manage security for you. The integrator is responsible for securing the vault's instance, managing access policies or handling of any admin tokens.
+It's important to understand that Murakami does **NOT** manage security for you. The integrator is responsible for securing the vault's instance, managing access policies or handling of any admin tokens.
 
 Hashicorp Vault has a lot of documentation on how to secure and configure your access policies. You can refer to the [Hashicorp Vault Security documentation](https://www.vaultproject.io/docs/security) or [Hashicorp Vault Access Policies documentation](https://www.vaultproject.io/docs/concepts/policies) for more information.
 
 ## User and Manager keys path
 
-Intermezzo uses two different paths for storing keys in vault. One for users and one for managers. These values are defined in the `.env` file as `VAULT_TRANSIT_USERS_PATH` and `VAULT_TRANSIT_MANAGERS_PATH`. Please configure these paths according to your security policies. 
+Murakami uses two different paths for storing keys in vault. One for users and one for managers. These values are defined in the `.env` file as `VAULT_TRANSIT_USERS_PATH` and `VAULT_TRANSIT_MANAGERS_PATH`. Please configure these paths according to your security policies. 
 
-When creating and access keys Intermezzo will append to those paths `/keys/{keyName}`. 
+When creating and access keys Murakami will append to those paths `/keys/{keyName}`. 
 
 ## Exportable keys
 
@@ -695,7 +695,7 @@ keys) are now created with `exportable: true` and
 `allow_plaintext_backup: true`. This is **required** for the
 `POST /v1/wallet/users/{user_id}/export` endpoint (see "Exporting a
 user's private key" above) to work, but it is a deliberate weakening of
-Intermezzo's default isolation guarantee: anyone holding a valid
+Murakami's default isolation guarantee: anyone holding a valid
 manager/user Vault token (plus the AppRole `role_id`/`secret_id`
 confirmation) can extract the raw private key for that key name.
 
@@ -706,6 +706,6 @@ this at key-creation time and it cannot be changed for existing keys.
 
 ## Vault Configuration and Root token
 
-Although Intermezzo provides a development script to initialize vault, unseal and configure access policies, it's important to understand that this is only for development purposes. You can read the file `vault/development-init.ts` to see what actions are being performed and take that as reference for your own vault configuration.
+Although Murakami provides a development script to initialize vault, unseal and configure access policies, it's important to understand that this is only for development purposes. You can read the file `vault/development-init.ts` to see what actions are being performed and take that as reference for your own vault configuration.
 
 In production, you should follow Hashicorp Vault's best practices for securing and configuring your vault instance.

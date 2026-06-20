@@ -3,7 +3,7 @@
  * `@algorandfoundation/credo-did-algo` plugin.
  *
  * The plugin can't depend on the host's `src/did/did-document.ts`
- * because that file is Intermezzo-specific and will not exist in
+ * because that file is Murakami-specific and will not exist in
  * CREDEBL. Reproducing the small subset we actually need (ed25519
  * multicodec + minimal base58btc encode) keeps the package free of
  * `src/` imports.

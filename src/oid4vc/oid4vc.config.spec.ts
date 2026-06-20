@@ -20,7 +20,7 @@ describe('Oid4vcConfig', () => {
 
   it('returns sensible defaults', async () => {
     const cfg = await build({});
-    expect(cfg.label).toBe('intermezzo');
+    expect(cfg.label).toBe('murakami');
     expect(cfg.baseUrl).toBe('http://localhost:3000/v1');
     expect(cfg.issuerPath).toBe('/oid4vci');
     expect(cfg.verifierPath).toBe('/oid4vp');
