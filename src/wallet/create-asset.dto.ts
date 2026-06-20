@@ -1,6 +1,7 @@
 import { IsBoolean, IsNumber, IsOptional, IsString } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
+import { toBigIntOrThrow } from './transforms';
 
 export class CreateAssetDto {
   @IsNumber()
@@ -10,7 +11,7 @@ export class CreateAssetDto {
   })
   total: number;
 
-  @Transform((val) => BigInt(val.value))
+  @Transform(toBigIntOrThrow)
   @ApiProperty({
     example: 2,
     description: 'The number of decimal places for the Asset',

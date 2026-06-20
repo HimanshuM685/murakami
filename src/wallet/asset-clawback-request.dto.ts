@@ -1,9 +1,10 @@
 import { IsString, IsNumber, IsOptional, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
+import { toBigIntOrThrow } from './transforms';
 
 export class AssetClawbackRequestDto {
-  @Transform((val) => BigInt(val.value))
+  @Transform(toBigIntOrThrow)
   @ApiProperty({
     example: 1234567890,
     description: 'The id of the Asset to clawback',

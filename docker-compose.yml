@@ -31,7 +31,11 @@ services:
       NODE_PORT: "8080"
     volumes:
       - .:/opt/app/
-      - /opt/app/node_modules
+      # Named volume (not anonymous) so Docker populates it from the image's
+      # pre-built /opt/app/node_modules, which is owned by the `node` user.
+      # An anonymous volume here comes up empty + root-owned on a fresh
+      # checkout, which breaks `yarn` (running as `node`) with EACCES.
+      - node_modules:/opt/app/node_modules
     ports:
       - "3000:3000"
     networks:
@@ -42,3 +46,6 @@ networks:
   algokit_sandbox:
     external: true
     name: algokit_sandbox_default
+
+volumes:
+  node_modules:
