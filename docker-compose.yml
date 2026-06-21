@@ -26,9 +26,6 @@ services:
     container_name: pawn
     env_file:
       - .env
-    environment:
-      NODE_HOST: algod
-      NODE_PORT: "8080"
     volumes:
       - .:/opt/app/
       # Named volume (not anonymous) so Docker populates it from the image's
@@ -38,14 +35,6 @@ services:
       - node_modules:/opt/app/node_modules
     ports:
       - "3000:3000"
-    networks:
-      - default
-      - algokit_sandbox
-
-networks:
-  algokit_sandbox:
-    external: true
-    name: algokit_sandbox_default
 
 volumes:
   node_modules:
