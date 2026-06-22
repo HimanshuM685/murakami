@@ -10,15 +10,6 @@ const useGlobalPipesSpy = jest.fn();
 const listenSpy = jest.fn().mockResolvedValue(undefined);
 const useSpy = jest.fn();
 
-// Stubs for the OID4VC providers fetched via `app.get(...)` during bootstrap.
-const oid4vcAgentStub = { issuerRouter: jest.fn(), verifierRouter: jest.fn() };
-const oid4vcConfigStub = {
-  issuerPath: '/oid4vci',
-  verifierPath: '/oid4vp',
-  issuerMountPath: '/v1/oid4vci',
-  verifierMountPath: '/v1/oid4vp',
-};
-
 // Create a fake app that mimics the Nest application
 const appMock = {
   useGlobalFilters: useGlobalFiltersSpy,
@@ -26,12 +17,7 @@ const appMock = {
   setGlobalPrefix: setGlobalPrefixSpy,
   useGlobalPipes: useGlobalPipesSpy,
   use: useSpy,
-  get: jest.fn((token) => {
-    const name = (token && (token.name as string)) || '';
-    if (name === 'Oid4vcAgentProvider') return oid4vcAgentStub;
-    if (name === 'Oid4vcConfig') return oid4vcConfigStub;
-    return undefined;
-  }),
+  get: jest.fn(() => undefined),
   listen: listenSpy,
 };
 
@@ -108,10 +94,5 @@ describe('Main bootstrap', () => {
 
   it('should call app.listen with port 3000', () => {
     expect(listenSpy).toHaveBeenCalledWith(3000);
-  });
-
-  it('should mount the OID4VC issuer and verifier routers at their configured mount paths', () => {
-    expect(useSpy).toHaveBeenCalledWith('/v1/oid4vci', expect.anything());
-    expect(useSpy).toHaveBeenCalledWith('/v1/oid4vp', expect.anything());
   });
 });

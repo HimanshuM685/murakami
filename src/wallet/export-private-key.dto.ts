@@ -4,17 +4,13 @@ import { IsString } from 'class-validator';
 export class ExportPrivateKeyRequestDto {
   @IsString()
   @ApiProperty({
-    example: '3ab5dada-ec1d-34a6-19ed-d63c9f6eba9c',
-    description: "Vault AppRole `role_id`, re-checked as a confirmation step before exporting the user's key.",
+    example: 's3cr3t-passphrase',
+    description:
+      'The user`s password (the one set at user creation). It is verified against the stored ' +
+      'scrypt hash before the private key is exported, so a stolen JWT alone is not enough to ' +
+      'extract key material.',
   })
-  role_id: string;
-
-  @IsString()
-  @ApiProperty({
-    example: 'e857e495-48b2-ab69-3cd1-99f6fe44ccc1',
-    description: "Vault AppRole `secret_id`, re-checked as a confirmation step before exporting the user's key.",
-  })
-  secret_id: string;
+  password: string;
 }
 
 export class ExportPrivateKeyResponseDto {

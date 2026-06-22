@@ -1,4 +1,4 @@
-import { IsArray, IsOptional } from 'class-validator';
+import { IsArray, IsOptional, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { CreateAssetDto } from './create-asset.dto';
@@ -7,6 +7,18 @@ import { AlgoTransferRequestDto } from './algo-transfer-request.dto';
 import { AssetClawbackRequestDto } from './asset-clawback-request.dto';
 
 export class GroupRequestDto {
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
+    required: false,
+    example: 's3cr3t-passphrase',
+    description:
+      'Required when any step is sent by a real user (not `manager`): that user`s password, ' +
+      'verified before their signing key is used. When several user-sent steps are present they ' +
+      'must all belong to the same user / share this password.',
+  })
+  password?: string;
+
   @IsArray()
   @IsOptional()
   @ApiProperty({

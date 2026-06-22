@@ -69,13 +69,13 @@ describe('Wallet Controller', () => {
 
       const result: UserInfoResponseDto = await walletController.userCreate(
         { vault_token: vaultToken },
-        { user_id: userId },
+        { user_id: userId, password: 'passw0rd' },
       );
 
       expect(result.user_id).toEqual(userId);
       expect(result.public_address).toEqual(expectedPublicAddress);
       expect(result.algoBalance).toEqual('0'); // Initial balance is set to 0
-      expect(mockWalletService.userCreate).toHaveBeenCalledWith(userId, vaultToken);
+      expect(mockWalletService.userCreate).toHaveBeenCalledWith(userId, 'passw0rd', vaultToken);
     });
   });
 
@@ -95,6 +95,7 @@ describe('Wallet Controller', () => {
         toAddress,
         amount,
         fromUserId: userId,
+        password: 'passw0rd',
       };
 
       const result = await walletController.algoTransferTx(requestMock, bodyRequest);
@@ -104,6 +105,7 @@ describe('Wallet Controller', () => {
         userId,
         toAddress,
         amount,
+        'passw0rd',
         undefined,
         undefined,
       );

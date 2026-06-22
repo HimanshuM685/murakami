@@ -2,14 +2,13 @@ import createMockInstance from 'jest-create-mock-instance';
 import { VaultService } from '../vault/vault.service';
 import { WalletService } from './wallet.service';
 import { ChainService } from '../chain/chain.service';
-import { DidService } from '../did/did.service';
-import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { CreateAssetDto } from './create-asset.dto';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { ManagerDetailDto } from './manager-detail.dto';
 import { plainToClass } from 'class-transformer';
 import { randomBytes } from 'crypto';
+import { hashPassword } from './password.util';
 import { Address } from '@algorandfoundation/algokit-utils';
 import {
   TruncatedAccountAssetResponse,
@@ -22,8 +21,6 @@ describe('WalletService', () => {
   let vaultServiceMock: jest.Mocked<VaultService>;
   let chainServiceMock: jest.Mocked<ChainService>;
   let configServiceMock: jest.Mocked<ConfigService>;
-  let didServiceMock: jest.Mocked<DidService>;
-  let oid4vcAgentProviderMock: jest.Mocked<Oid4vcAgentProvider>;
 
   let chainService: ChainService;
   let httpService: HttpService;
@@ -32,21 +29,7 @@ describe('WalletService', () => {
     vaultServiceMock = createMockInstance(VaultService);
     chainServiceMock = createMockInstance(ChainService);
     configServiceMock = createMockInstance(ConfigService);
-    didServiceMock = createMockInstance(DidService);
-    didServiceMock.publishControlledDid.mockResolvedValue({
-      did: 'did:algo:test:app:1:00',
-      document: {} as never,
-      txIds: [],
-    });
-    didServiceMock.deriveDid.mockReturnValue('did:algo:test:app:1:derived');
-    oid4vcAgentProviderMock = createMockInstance(Oid4vcAgentProvider);
-    walletService = new WalletService(
-      vaultServiceMock,
-      chainServiceMock,
-      configServiceMock,
-      didServiceMock,
-      oid4vcAgentProviderMock,
-    );
+    walletService = new WalletService(vaultServiceMock, chainServiceMock, configServiceMock);
 
     httpService = createMockInstance(HttpService);
     chainService = new ChainService(configServiceMock, httpService);
@@ -75,8 +58,14 @@ describe('WalletService', () => {
     vaultServiceMock.transitCreateKey.mockResolvedValueOnce(pubKey);
     chainServiceMock.getAccountBalance.mockResolvedValueOnce(0n);
 
-    const result = await walletService.userCreate(userId, 'vault_token');
+    const result = await walletService.userCreate(userId, 'passw0rd', 'vault_token');
 
+    // The password hash is persisted to Vault KV.
+    expect(vaultServiceMock.kvWrite).toHaveBeenCalledWith(
+      `murakami/users/${userId}`,
+      expect.objectContaining({ password_hash: expect.any(String) }),
+      'vault_token',
+    );
     expect(result).toStrictEqual({
       public_address: new Address(pubKey).toString(),
       user_id: userId,
@@ -527,6 +516,7 @@ describe('WalletService', () => {
         'manager',
         toAddress,
         amount,
+        undefined,
         lease,
         note,
       );
@@ -548,6 +538,7 @@ describe('WalletService', () => {
     it('transferAlgoToAddress() -- as user with lease and note', async () => {
       vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(userPubKey);
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(1000000n);
+      vaultServiceMock.kvRead.mockResolvedValueOnce({ password_hash: hashPassword('pw') });
 
       const userId = 'user123';
       const result = await walletService.transferAlgoToAddress(
@@ -555,6 +546,7 @@ describe('WalletService', () => {
         userId,
         toAddress,
         amount,
+        'pw',
         lease,
         note,
       );
@@ -691,9 +683,10 @@ describe('WalletService', () => {
     it('appCall() -- as user', async () => {
       vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(userPubKey);
       chainServiceMock.getAccountBalance.mockResolvedValueOnce(1000000n);
+      vaultServiceMock.kvRead.mockResolvedValueOnce({ password_hash: hashPassword('pw') });
 
       const userId = 'user123';
-      const dto = { fromUserId: userId, appId: 123, onComplete: 0 } as any;
+      const dto = { fromUserId: userId, appId: 123, onComplete: 0, password: 'pw' } as any;
       const result = await walletService.appCall(vaultToken, dto);
 
       expect(chainServiceMock.craftAppCallTx).toHaveBeenCalledWith(userPublicAddress, dto, suggestedParams, undefined);
@@ -799,30 +792,39 @@ describe('WalletService', () => {
     });
   });
 
-  describe('deployManagerIdentity()', () => {
-    it('maps algod overspend errors to UnprocessableEntityException with a friendly message', async () => {
-      const overspendMessage =
-        'Error resolving execution info via simulate in transaction 0: ' +
-        'transaction CWNRIIDBLS22ZUFNQPM7Y7PFOTLF4B75PUZ4L53T4KCWICJF66HQ: ' +
-        'overspend (account 3E6ZXNHDFE4FJCLUKNUOHFUGHHOHA7N2QNFVU2HH7FUSQUAGPITQLCGB5E, ' +
-        'tried to spend {1000})';
-      didServiceMock.deployStorage.mockRejectedValueOnce(new Error(overspendMessage));
+  describe('password gating', () => {
+    const userId = 'user123';
+    const vaultToken = 'vault_token';
 
-      await expect(walletService.deployManagerIdentity('vault_token')).rejects.toMatchObject({
-        status: 422,
-        message: expect.stringContaining('Manager account is underfunded'),
+    it('exportPrivateKey() -- succeeds with the correct password', async () => {
+      const userPubKey = randomBytes(32);
+      vaultServiceMock.kvRead.mockResolvedValueOnce({ password_hash: hashPassword('pw') });
+      vaultServiceMock.getUserPublicKey.mockResolvedValueOnce(userPubKey);
+      chainServiceMock.getAccountBalance.mockResolvedValueOnce(0n);
+      vaultServiceMock.exportUserKey.mockResolvedValueOnce({ version: '1', key: 'base64key==' });
+
+      const result = await walletService.exportPrivateKey(userId, vaultToken, 'pw');
+
+      expect(result).toStrictEqual({
+        user_id: userId,
+        public_address: new Address(userPubKey).toString(),
+        key_version: '1',
+        private_key: 'base64key==',
       });
-
-      expect(didServiceMock.deployStorage).toHaveBeenCalledWith('vault_token', { force: undefined });
-      expect(oid4vcAgentProviderMock.resetCachedIssuerDid).not.toHaveBeenCalled();
-      expect(oid4vcAgentProviderMock.ensureIssuerDid).not.toHaveBeenCalled();
     });
 
-    it('rethrows non-overspend errors unchanged', async () => {
-      const other = new Error('something else exploded');
-      didServiceMock.deployStorage.mockRejectedValueOnce(other);
+    it('exportPrivateKey() -- rejects a wrong password', async () => {
+      vaultServiceMock.kvRead.mockResolvedValueOnce({ password_hash: hashPassword('pw') });
 
-      await expect(walletService.deployManagerIdentity('vault_token')).rejects.toBe(other);
+      await expect(walletService.exportPrivateKey(userId, vaultToken, 'wrong')).rejects.toMatchObject({ status: 401 });
+      expect(vaultServiceMock.exportUserKey).not.toHaveBeenCalled();
+    });
+
+    it('exportPrivateKey() -- rejects when no password is on record', async () => {
+      vaultServiceMock.kvRead.mockResolvedValueOnce(undefined);
+
+      await expect(walletService.exportPrivateKey(userId, vaultToken, 'pw')).rejects.toMatchObject({ status: 401 });
+      expect(vaultServiceMock.exportUserKey).not.toHaveBeenCalled();
     });
   });
 });

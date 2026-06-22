@@ -26,6 +26,17 @@ export class AlgoTransferRequestDto {
   @IsString()
   @IsOptional()
   @ApiProperty({
+    required: false,
+    example: 's3cr3t-passphrase',
+    description:
+      'Required when `fromUserId` is a real user (not `manager`): the user`s password, verified ' +
+      'before their signing key is used. Ignored when the sender is the manager.',
+  })
+  password?: string;
+
+  @IsString()
+  @IsOptional()
+  @ApiProperty({
     example: '9kykoZ1IpuOAqhzDgRVaVY2ME0ZlCNrUpnzxpXlEF/s=',
     description:
       'Optional 32-byte base64-encoded lease to prevent replay and conflicting transactions. Use a fixed value to ensure exclusivity. Generate with: Buffer.from(crypto.randomBytes(32)).toString("base64")',

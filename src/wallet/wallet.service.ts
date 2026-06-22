@@ -1,13 +1,10 @@
-import { Injectable, Logger, NotFoundException, UnprocessableEntityException, HttpException } from '@nestjs/common';
+import { Injectable, Logger, HttpException, UnauthorizedException } from '@nestjs/common';
 import { VaultService } from '../vault/vault.service';
 import { ChainService } from '../chain/chain.service';
-import { DidService } from '../did/did.service';
 import { CreateAssetDto } from './create-asset.dto';
 import { UserInfoResponseDto } from './user-info-response.dto';
 import { ConfigService } from '@nestjs/config';
 import { ManagerDetailDto } from './manager-detail.dto';
-import { ManagerIdentityDto, DeployManagerIdentityResponseDto } from './manager-identity.dto';
-import { Oid4vcAgentProvider } from '../oid4vc/agent/oid4vc-agent.provider';
 import { plainToClass } from 'class-transformer';
 import { AssetHolding } from 'src/chain/algo-node-responses';
 import { Address } from '@algorandfoundation/algokit-utils';
@@ -15,6 +12,10 @@ import { decodeTransaction } from '@algorandfoundation/algokit-utils/transact';
 import { AppCallRequestDto } from './app-call-request.dto';
 import { GroupRequestDto } from './group-request.dto';
 import { ExportPrivateKeyResponseDto } from './export-private-key.dto';
+import { hashPassword, verifyPassword } from './password.util';
+
+/** Sentinel `fromUserId` that signs with the manager Vault key. */
+const MANAGER_ID = 'manager';
 
 @Injectable()
 export class WalletService {
@@ -22,94 +23,43 @@ export class WalletService {
     private readonly vaultService: VaultService,
     private readonly chainService: ChainService,
     private readonly configService: ConfigService,
-    private readonly didService: DidService,
-    private readonly oid4vcAgentProvider: Oid4vcAgentProvider,
   ) {}
 
-  async getManagerIdentity(): Promise<ManagerIdentityDto> {
-    await this.didService.ensureAppIdLoaded();
-    if (!this.didService.hasAppId()) {
-      throw new NotFoundException(
-        'Manager identity is not deployed. Call `POST /v1/wallet/manager/identity` ' +
-          'with the manager Vault JWT to deploy a `DIDAlgoStorage` contract and ' +
-          'provision the issuer `did:algo`.',
-      );
-    }
-    const issuer = await this.oid4vcAgentProvider.ensureIssuerDid();
-    const agent = await this.oid4vcAgentProvider.getAgent();
-    const resolved = await agent.dids.resolve(issuer.did);
-    if (!resolved.didDocument) {
-      throw new Error(
-        `WalletService.getManagerIdentity: did:algo "${issuer.did}" resolved with no DID Document ` +
-          `(error=${resolved.didResolutionMetadata?.error ?? 'unknown'}).`,
-      );
-    }
-    const appId = this.didService.getAppIdIfDeployed()!;
-    const appAddress = this.didService.getAppAddress();
-    const appBalance = await this.chainService.getAccountBalance(appAddress);
-    return plainToClass(ManagerIdentityDto, {
-      deployed: true,
-      did: issuer.did,
-      verificationMethodId: issuer.verificationMethodId,
-      didDocument: resolved.didDocument.toJSON() as Record<string, unknown>,
-      appId: appId.toString(),
-      appAddress,
-      appBalance: appBalance.toString(),
-    });
+  // ────────────────────────────────────────────────────────────────
+  // Per-user password gating
+  //
+  // Each user's signing key lives in Vault and is normally used by the
+  // manager JWT alone. To require an explicit per-user secret before a
+  // user's own Algos are spent (or their key exported), we persist a
+  // scrypt hash of a password in Vault KV at `murakami/users/<id>` and
+  // verify it on those operations.
+  // ────────────────────────────────────────────────────────────────
+
+  private userKvPath(user_id: string): string {
+    return `murakami/users/${user_id}`;
   }
 
-  async deployManagerIdentity(
-    vaultToken: string,
-    options: { force?: boolean } = {},
-  ): Promise<DeployManagerIdentityResponseDto> {
-    let deployment: Awaited<ReturnType<DidService['deployStorage']>>;
-    try {
-      deployment = await this.didService.deployStorage(vaultToken, { force: options.force });
-    } catch (error) {
-      // `algokit-utils` surfaces an unfunded-sender failure as a
-      // generic `Error` whose message embeds algod's simulate output,
-      // e.g. `... overspend (account ABC..., tried to spend {1000})`.
-      // Surface it as a clear 422 so the operator knows the next
-      // action is to fund the manager account rather than retry or
-      // file a bug.
-      const message = (error as Error)?.message ?? '';
-      if (/overspend/i.test(message)) {
-        Logger.warn(`deployManagerIdentity: manager account is underfunded — ${message}`);
-        throw new UnprocessableEntityException(
-          'Manager account is underfunded and cannot pay for the DIDAlgoStorage contract deployment. ' +
-            'Fund the manager Algorand account and retry `POST /v1/wallet/manager/identity`.',
-        );
-      }
-      throw error;
+  /** Persist the scrypt hash of a user's password in Vault KV. */
+  private async setUserPassword(user_id: string, password: string, vault_token: string): Promise<void> {
+    await this.vaultService.kvWrite(this.userKvPath(user_id), { password_hash: hashPassword(password) }, vault_token);
+  }
+
+  /**
+   * Verify a user's password against the stored hash. Throws
+   * `UnauthorizedException` when the password is missing or wrong, or
+   * when the user has no password on record.
+   */
+  private async assertUserPassword(user_id: string, password: string | undefined, vault_token: string): Promise<void> {
+    if (!password) {
+      throw new UnauthorizedException(`A password is required to act as user "${user_id}".`);
     }
-    // Reset the cached issuer DID so `ensureIssuerDid` re-provisions
-    // against the new contract on the next call.
-    this.oid4vcAgentProvider.resetCachedIssuerDid();
-    const issuer = await this.oid4vcAgentProvider.ensureIssuerDid();
-    const agent = await this.oid4vcAgentProvider.getAgent();
-    const resolved = await agent.dids.resolve(issuer.did);
-    if (!resolved.didDocument) {
-      throw new Error(
-        `WalletService.deployManagerIdentity: did:algo "${issuer.did}" resolved with no DID Document ` +
-          `(error=${resolved.didResolutionMetadata?.error ?? 'unknown'}).`,
-      );
+    const record = await this.vaultService.kvRead<{ password_hash?: string }>(this.userKvPath(user_id), vault_token);
+    if (!record?.password_hash) {
+      throw new UnauthorizedException(`No password is set for user "${user_id}".`);
     }
-    const appBalance = await this.chainService.getAccountBalance(deployment.appAddress);
-    return plainToClass(DeployManagerIdentityResponseDto, {
-      deployed: true,
-      did: issuer.did,
-      verificationMethodId: issuer.verificationMethodId,
-      didDocument: resolved.didDocument.toJSON() as Record<string, unknown>,
-      appId: deployment.appId.toString(),
-      appAddress: deployment.appAddress,
-      appBalance: appBalance.toString(),
-      operation: deployment.operation,
-      deleteTxIds: deployment.deleteTxIds,
-      uploadTxIds: deployment.uploadTxIds,
-      skipped: deployment.skipped,
-      oldMbrMicroAlgos: deployment.oldMbrMicroAlgos,
-      newMbrMicroAlgos: deployment.newMbrMicroAlgos,
-    });
+    if (!verifyPassword(password, record.password_hash)) {
+      throw new UnauthorizedException(`Invalid password for user "${user_id}".`);
+    }
   }
 
   async getUserInfo(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
@@ -151,20 +101,14 @@ export class WalletService {
   /**
    * Export the raw ed25519 private key for a user.
    *
-   * As a confirmation step, the caller must re-supply a valid Vault
-   * AppRole `role_id`/`secret_id` pair (the same credentials used to
-   * sign in) — this is re-verified against Vault before the key is
-   * exported, so a stolen JWT alone is not enough to extract key
-   * material.
+   * As a confirmation step, the caller must supply the user's password
+   * (set at user creation). It is verified against the stored scrypt
+   * hash before the key is exported, so a stolen JWT alone is not
+   * enough to extract key material.
    */
-  async exportPrivateKey(
-    user_id: string,
-    vault_token: string,
-    roleId: string,
-    secretId: string,
-  ): Promise<ExportPrivateKeyResponseDto> {
-    // Re-verify the caller's AppRole credentials before exporting.
-    await this.vaultService.getTokenWithRole(roleId, secretId);
+  async exportPrivateKey(user_id: string, vault_token: string, password: string): Promise<ExportPrivateKeyResponseDto> {
+    // Re-verify the user's password before exporting.
+    await this.assertUserPassword(user_id, password, vault_token);
 
     const { public_address } = await this.getUserInfo(user_id, vault_token);
     const { version, key } = await this.vaultService.exportUserKey(user_id, vault_token);
@@ -177,11 +121,12 @@ export class WalletService {
     };
   }
 
-  // Create new user and key
-  async userCreate(user_id: string, vault_token: string): Promise<UserInfoResponseDto> {
+  // Create new user and key, and store the password that protects it.
+  async userCreate(user_id: string, password: string, vault_token: string): Promise<UserInfoResponseDto> {
     const transitKeyPath: string = this.configService.get<string>('VAULT_TRANSIT_USERS_PATH');
 
     const public_key: Buffer = await this.vaultService.transitCreateKey(user_id, transitKeyPath, vault_token);
+    await this.setUserPassword(user_id, password, vault_token);
     const public_address: string = new Address(public_key).toString();
     return { user_id, public_address, algoBalance: '0' }; // Initial balance is set to 0
   }
@@ -291,6 +236,7 @@ export class WalletService {
     fromUserId: string,
     toAddress: string,
     amount: number,
+    password?: string,
     lease?: string,
     note?: string,
   ): Promise<string> {
@@ -298,10 +244,12 @@ export class WalletService {
     let fromAddress: string;
 
     try {
-      if (fromUserId === 'manager') {
+      if (fromUserId === MANAGER_ID) {
         const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
         fromAddress = new Address(managerPublicKey).toString();
       } else {
+        // Spending a user's own Algos requires that user's password.
+        await this.assertUserPassword(fromUserId, password, vault_token);
         fromAddress = (await this.getUserInfo(fromUserId, vault_token)).public_address;
       }
     } catch (error) {
@@ -515,10 +463,12 @@ export class WalletService {
     let fromAddress: string;
 
     try {
-      if (appCallRequestDto.fromUserId === 'manager') {
+      if (appCallRequestDto.fromUserId === MANAGER_ID) {
         const managerPublicKey: Buffer = await this.vaultService.getManagerPublicKey(vault_token);
         fromAddress = new Address(managerPublicKey).toString();
       } else {
+        // App calls sent by a user sign with the user's key — gate on their password.
+        await this.assertUserPassword(appCallRequestDto.fromUserId, appCallRequestDto.password, vault_token);
         fromAddress = (await this.getUserInfo(appCallRequestDto.fromUserId, vault_token)).public_address;
       }
     } catch (error) {
@@ -584,9 +534,10 @@ export class WalletService {
       switch (key) {
         case 'appCall': {
           let fromAddress: string;
-          if (value.fromUserId === 'manager') {
+          if (value.fromUserId === MANAGER_ID) {
             fromAddress = managerPublicAddress;
           } else {
+            await this.assertUserPassword(value.fromUserId, groupRequestDto.password, vault_token);
             fromAddress = (await this.getUserInfo(value.fromUserId, vault_token)).public_address;
             addressToUserId[fromAddress] = value.fromUserId;
           }
@@ -616,9 +567,10 @@ export class WalletService {
         }
         case 'payment': {
           let fromAddress: string;
-          if (value.fromUserId === 'manager') {
+          if (value.fromUserId === MANAGER_ID) {
             fromAddress = managerPublicAddress;
           } else {
+            await this.assertUserPassword(value.fromUserId, groupRequestDto.password, vault_token);
             fromAddress = (await this.getUserInfo(value.fromUserId, vault_token)).public_address;
             addressToUserId[fromAddress] = value.fromUserId;
           }
