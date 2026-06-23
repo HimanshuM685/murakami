@@ -33,8 +33,14 @@ services:
       # An anonymous volume here comes up empty + root-owned on a fresh
       # checkout, which breaks `yarn` (running as `node`) with EACCES.
       - node_modules:/opt/app/node_modules
+      # Same rationale as node_modules: `nest build --watch` writes to
+      # /opt/app/dist, but that path is under the bind mount above, where the
+      # host dir isn't writable by the `node` user (EACCES on mkdir). A named
+      # volume is populated from the image's pre-built, node-owned /opt/app/dist.
+      - dist:/opt/app/dist
     ports:
       - "3000:3000"
 
 volumes:
   node_modules:
+  dist:
